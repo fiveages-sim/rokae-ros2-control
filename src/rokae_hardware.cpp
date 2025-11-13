@@ -17,6 +17,8 @@
 #include <sstream>
 #include <iomanip>
 #include <type_traits>
+#include <chrono>
+#include <algorithm>
 
 namespace rokae_ros2_control {
     hardware_interface::CallbackReturn RokaeHardware::on_init(const hardware_interface::HardwareComponentInterfaceParams &params) {
@@ -35,6 +37,14 @@ namespace rokae_ros2_control {
         joint_velocities_.resize(joint_count, 0.0);
         joint_efforts_.resize(joint_count, 0.0);
         joint_position_commands_.resize(joint_count, 0.0);
+        
+        // 初始化插值相关变量
+        prev_joint_position_commands_.resize(joint_count, 0.0);
+        next_joint_position_commands_.resize(joint_count, 0.0);
+        last_sent_joint_positions_.resize(joint_count, 0.0);
+        const double default_period = 0.01;  // 默认100Hz
+        alpha_increment_ = 0.001 / default_period;  // 预计算alpha增量
+        interpolation_alpha_ = 0.0;  // 初始插值系数为0
 
         RCLCPP_INFO(get_node()->get_logger(), "Found %d joints in configuration", joint_count);
 
@@ -58,12 +68,71 @@ namespace rokae_ros2_control {
         // 读取配置参数
         arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.2.161"));
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.2.233"));
+        rt_network_tolerance_ = get_hardware_parameter("rt_network_tolerance", 20u);  // 默认20%
+
+        // 读取阻抗配置参数
+        use_impedance_control_ = false;
+        std::fill(joint_impedance_.begin(), joint_impedance_.end(), 0.0);
+        
+        // 尝试从硬件参数中读取阻抗配置（格式：逗号分隔的数值，如 "500,500,500,500,50,50,50"）
+        if (auto it = params.hardware_info.hardware_parameters.find("joint_impedance"); 
+            it != params.hardware_info.hardware_parameters.end() && !it->second.empty()) {
+            std::stringstream ss(it->second);
+            std::string token;
+            std::vector<double> impedance_values;
+            
+            // 解析逗号分隔的数值
+            while (std::getline(ss, token, ',')) {
+                try {
+                    double value = std::stod(token);
+                    impedance_values.push_back(value);
+                } catch (const std::exception&) {
+                    RCLCPP_WARN(get_node()->get_logger(), 
+                               "Invalid impedance value in token: %s", token.c_str());
+                }
+            }
+            
+            // 验证阻抗参数有效性：数量必须匹配关节数量，且所有值必须大于0
+            if (impedance_values.size() == static_cast<size_t>(joint_count)) {
+                bool all_positive = true;
+                for (size_t i = 0; i < impedance_values.size(); ++i) {
+                    if (impedance_values[i] <= 0.0) {
+                        all_positive = false;
+                        break;
+                    }
+                    joint_impedance_[i] = impedance_values[i];
+                }
+                
+                if (all_positive) {
+                    use_impedance_control_ = true;
+                    // 格式化输出阻抗系数
+                    std::stringstream ss;
+                    ss << "Impedance control enabled with coefficients: [";
+                    for (int i = 0; i < joint_count; ++i) {
+                        ss << std::fixed << std::setprecision(1) << joint_impedance_[i];
+                        if (i < joint_count - 1) ss << ", ";
+                    }
+                    ss << "]";
+                    RCLCPP_INFO(get_node()->get_logger(), "%s", ss.str().c_str());
+                } else {
+                    RCLCPP_WARN(get_node()->get_logger(), 
+                               "Impedance values must be positive, using position control mode");
+                }
+            } else {
+                RCLCPP_WARN(get_node()->get_logger(), 
+                           "Impedance parameter count (%zu) doesn't match joint count (%d), using position control mode",
+                           impedance_values.size(), joint_count);
+            }
+        }
 
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
         RCLCPP_INFO(get_node()->get_logger(), "RokaeHardware initialized successfully");
         RCLCPP_INFO(get_node()->get_logger(), "  Arm IP: %s", arm_ip_.c_str());
         RCLCPP_INFO(get_node()->get_logger(), "  Local IP: %s", local_ip_.c_str());
         RCLCPP_INFO(get_node()->get_logger(), "  Number of joints: %d", joint_count);
+        RCLCPP_INFO(get_node()->get_logger(), "  Control mode: %s", 
+                    use_impedance_control_ ? "Impedance" : "Position");
+        RCLCPP_INFO(get_node()->get_logger(), "  RT network tolerance: %u%%", rt_network_tolerance_);
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
 
         // 初始化xCoreSDK
@@ -102,11 +171,18 @@ namespace rokae_ros2_control {
             // 从当前机器人位置初始化命令位置，避免突然跳跃
             auto current_pos = arm_robot_->jointPos(ec);
             if (!ec) {
-                // std::lock_guard<std::mutex> lock(data_mutex_);
                 for (size_t i = 0; i < joint_names_.size(); ++i) {
                     joint_positions_[i] = current_pos[i];
                     joint_position_commands_[i] = current_pos[i];
+                    // 初始化插值命令为当前位置
+                    prev_joint_position_commands_[i] = current_pos[i];
+                    next_joint_position_commands_[i] = current_pos[i];
+                    last_sent_joint_positions_[i] = current_pos[i];
                 }
+                // 插值相关变量会在第一次write调用时初始化
+                const double default_period = 0.01;  // 默认100Hz
+                alpha_increment_ = 0.001 / default_period;
+                interpolation_alpha_ = 0.0;
 
                 // 打印初始位置（动态格式化）
                 std::stringstream ss;
@@ -172,19 +248,22 @@ namespace rokae_ros2_control {
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
-    std::vector<hardware_interface::StateInterface> RokaeHardware::export_state_interfaces() {
-        std::vector<hardware_interface::StateInterface> state_interfaces;
+    std::vector<hardware_interface::StateInterface::ConstSharedPtr> RokaeHardware::on_export_state_interfaces() {
+        std::vector<hardware_interface::StateInterface::ConstSharedPtr> state_interfaces;
 
         // 为所有关节导出状态接口：位置、速度、力矩
         for (size_t i = 0; i < joint_names_.size(); ++i) {
-            state_interfaces.emplace_back(
-                joint_names_[i], hardware_interface::HW_IF_POSITION, &joint_positions_[i]);
+            state_interfaces.push_back(
+                std::make_shared<hardware_interface::StateInterface>(
+                    joint_names_[i], hardware_interface::HW_IF_POSITION, &joint_positions_[i]));
 
-            state_interfaces.emplace_back(
-                joint_names_[i], hardware_interface::HW_IF_VELOCITY, &joint_velocities_[i]);
+            state_interfaces.push_back(
+                std::make_shared<hardware_interface::StateInterface>(
+                    joint_names_[i], hardware_interface::HW_IF_VELOCITY, &joint_velocities_[i]));
 
-            state_interfaces.emplace_back(
-                joint_names_[i], hardware_interface::HW_IF_EFFORT, &joint_efforts_[i]);
+            state_interfaces.push_back(
+                std::make_shared<hardware_interface::StateInterface>(
+                    joint_names_[i], hardware_interface::HW_IF_EFFORT, &joint_efforts_[i]));
         }
 
         RCLCPP_INFO(get_node()->get_logger(),
@@ -194,17 +273,14 @@ namespace rokae_ros2_control {
         return state_interfaces;
     }
 
-    std::vector<hardware_interface::CommandInterface> RokaeHardware::export_command_interfaces() {
-        std::vector<hardware_interface::CommandInterface> command_interfaces;
+    std::vector<hardware_interface::CommandInterface::SharedPtr> RokaeHardware::on_export_command_interfaces() {
+        std::vector<hardware_interface::CommandInterface::SharedPtr> command_interfaces;
 
         // 为所有关节导出命令接口：位置命令
         for (size_t i = 0; i < joint_names_.size(); ++i) {
-            command_interfaces.emplace_back(
-                joint_names_[i], hardware_interface::HW_IF_POSITION, &joint_position_commands_[i]);
-            // command_interfaces.emplace_back(
-            //     joint_names_[i], hardware_interface::HW_IF_VELOCITY, &joint_velocities_commands_[i]);
-            // command_interfaces.emplace_back(
-            //     joint_names_[i], hardware_interface::HW_IF_EFFORT, &joint_efforts_commands_[i]);
+            command_interfaces.push_back(
+                std::make_shared<hardware_interface::CommandInterface>(
+                    joint_names_[i], hardware_interface::HW_IF_POSITION, &joint_position_commands_[i]));
         }
 
         RCLCPP_INFO(get_node()->get_logger(),
@@ -221,8 +297,8 @@ namespace rokae_ros2_control {
         if (arm_robot_ && state_receive_started_) {
             for (size_t i = 0; i < joint_names_.size(); ++i) {
                 joint_positions_[i] = joint_positions_array_[i];
-                // joint_velocities_[i] = joint_velocities_array_[i];
-                // joint_efforts_[i] = joint_efforts_array_[i];
+                joint_velocities_[i] = joint_velocities_array_[i];
+                joint_efforts_[i] = joint_efforts_array_[i];
             }
         }
 
@@ -230,12 +306,26 @@ namespace rokae_ros2_control {
     }
 
     hardware_interface::return_type RokaeHardware::write(
-        const rclcpp::Time & /*time*/,
-        const rclcpp::Duration & /*period*/) {
+        const rclcpp::Time &time,
+        const rclcpp::Duration &period) {
         // 启动实时控制线程（类似Dobot的延迟启动策略）
         if (arm_robot_ && !rt_control_running_) {
             startRealtimeControl();
         }
+
+        // 更新命令（自适应频率）
+        // 使用上一次实际下发的关节位置作为插值起点（在1kHz callback中记录）
+        // 这样可以避免使用可能有延迟的读取位置
+        prev_joint_position_commands_ = last_sent_joint_positions_;
+        // 更新下一次命令（来自控制器）
+        next_joint_position_commands_ = joint_position_commands_;
+        
+        // 更新硬件更新周期并预计算alpha增量（从period参数获取）
+        double hw_period = period.seconds();
+        alpha_increment_ = 0.001 / hw_period;  // 1kHz回调周期 / 硬件更新周期
+        
+        // 重置插值系数为0（开始新的插值周期）
+        interpolation_alpha_ = 0.0;
 
         return hardware_interface::return_type::OK;
     }
@@ -266,6 +356,16 @@ namespace rokae_ros2_control {
 
             if (!rt_controller_) {
                 throw std::runtime_error("Failed to get realtime motion controller");
+            }
+
+            // 设置RT网络容差，提高网络稳定性
+            arm_robot_->setRtNetworkTolerance(rt_network_tolerance_, ec);
+            if (ec) {
+                RCLCPP_WARN(get_node()->get_logger(), 
+                           "Failed to set RT network tolerance: %s", ec.message().c_str());
+            } else {
+                RCLCPP_INFO(get_node()->get_logger(), 
+                           "RT network tolerance set to %u%%", rt_network_tolerance_);
             }
 
             // 初始化实时控制状态
@@ -343,24 +443,54 @@ namespace rokae_ros2_control {
 
     void RokaeHardware::controlLoop() {
         try {
-            // 设置控制回调
-            std::function<rokae::JointPosition()> callback = [this]() {
-                std::vector<double> joint_positions(joint_names_.size());
-                {
-                    // std::lock_guard<std::mutex> lock(data_mutex_);
-                    arm_robot_->updateRobotState(std::chrono::milliseconds(1));
-                    arm_robot_->getStateData(rokae::RtSupportedFields::jointPos_m, joint_positions_array_);
-                    // arm_robot_->getStateData(rokae::RtSupportedFields::jointVel_m, joint_velocities_array_);
-                    // arm_robot_->getStateData(rokae::RtSupportedFields::tau_m, joint_efforts_array_);
-                    for (size_t i = 0; i < joint_names_.size(); ++i) {
-                        joint_positions[i] = joint_position_commands_[i];
-                    }
+            // 设置控制回调（1kHz执行）
+            const std::function callback = [this] {
+                // 读取机器人状态
+                arm_robot_->getStateData(rokae::RtSupportedFields::jointPos_m, joint_positions_array_);
+                arm_robot_->getStateData(rokae::RtSupportedFields::jointVel_m, joint_velocities_array_);
+                arm_robot_->getStateData(rokae::RtSupportedFields::tau_m, joint_efforts_array_);
+                
+                // 计算插值命令
+                // 累积插值系数（使用预计算的增量）
+                interpolation_alpha_ += alpha_increment_;
+                
+                // 限制alpha在0.0到1.0之间
+                if (interpolation_alpha_ > 1.0) {
+                    interpolation_alpha_ = 1.0;
                 }
-                return rokae::JointPosition(joint_positions);
+                
+                // 线性插值生成1kHz命令，直接写入last_sent_joint_positions_
+                for (size_t i = 0; i < joint_names_.size() && 
+                     i < prev_joint_position_commands_.size() && 
+                     i < next_joint_position_commands_.size(); ++i) {
+                    last_sent_joint_positions_[i] = prev_joint_position_commands_[i] + 
+                                                    (next_joint_position_commands_[i] - prev_joint_position_commands_[i]) * interpolation_alpha_;
+                }
+                
+                return rokae::JointPosition(last_sent_joint_positions_);
             };
 
-            rt_controller_->setControlLoop(callback);
-            rt_controller_->startMove(rokae::RtControllerMode::jointPosition);
+            rt_controller_->setControlLoop(callback, 50, true);
+
+            // 根据配置选择控制模式
+            if (use_impedance_control_) {
+                // 阻抗控制模式：先设置阻抗参数，再启动阻抗控制
+                std::error_code ec;
+                rt_controller_->setJointImpedance(joint_impedance_, ec);
+                if (ec) {
+                    RCLCPP_ERROR(get_node()->get_logger(), 
+                               "Failed to set joint impedance: %s, falling back to position control", 
+                               ec.message().c_str());
+                    rt_controller_->startMove(rokae::RtControllerMode::jointPosition);
+                } else {
+                    RCLCPP_INFO(get_node()->get_logger(), "Starting joint impedance control");
+                    rt_controller_->startMove(rokae::RtControllerMode::jointImpedance);
+                }
+            } else {
+                // 位置控制模式
+                rt_controller_->startMove(rokae::RtControllerMode::jointPosition);
+            }
+
             rt_controller_->startLoop(true);
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Control loop error: %s", e.what());

@@ -15,7 +15,6 @@
 #pragma once
 
 #include <hardware_interface/system_interface.hpp>
-#include <hardware_interface/hardware_info.hpp>
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
@@ -64,15 +63,15 @@ public:
 
     /**
      * @brief 导出状态接口（位置、速度、力矩）
-     * @return 状态接口列表
+     * @return 状态接口列表（智能指针）
      */
-    std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
+    std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
 
     /**
      * @brief 导出命令接口（位置命令）
-     * @return 命令接口列表
+     * @return 命令接口列表（智能指针）
      */
-    std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+    std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
 
     /**
      * @brief 读取机器人状态
@@ -102,10 +101,20 @@ private:
     std::vector<double> joint_velocities_commands_;  // 关节速度命令（弧度）
     std::vector<double> joint_efforts_commands_;  // 关节力矩命令（牛顿）
     std::vector<std::string> joint_names_;         // 关节名称列表
+    
+    // 命令插值相关（自适应硬件接口频率到1kHz实时控制的插值）
+    std::vector<double> prev_joint_position_commands_;  // 上一次关节位置命令（用于插值）
+    std::vector<double> next_joint_position_commands_;   // 下一次关节位置命令（用于插值）
+    std::vector<double> last_sent_joint_positions_;  // 上一次实际下发的关节位置（在1kHz callback中记录）
+    double alpha_increment_;  // 每次1kHz回调的alpha增量（在write中预计算：0.001 / hw_update_period_）
+    double interpolation_alpha_;  // 插值系数（0.0到1.0，在controlLoop中自动累积，在write中重置）
 
     // 配置参数
     std::string arm_ip_;           // 机械臂IP地址
     std::string local_ip_;         // 本地IP地址
+    bool use_impedance_control_;   // 是否使用阻抗控制模式
+    std::array<double, 7> joint_impedance_;  // 关节阻抗系数（Nm/rad）
+    unsigned int rt_network_tolerance_;  // RT网络容差（百分比，默认20%）
 
     // xCoreSDK相关
     std::unique_ptr<rokae::xMateErProRobot> arm_robot_;
