@@ -114,7 +114,6 @@ private:
     std::string local_ip_;         // 本地IP地址
     bool use_impedance_control_;   // 是否使用阻抗控制模式
     std::array<double, 7> joint_impedance_;  // 关节阻抗系数（Nm/rad）
-    unsigned int rt_network_tolerance_;  // RT网络容差（百分比，默认20%）
 
     // xCoreSDK相关
     std::unique_ptr<rokae::xMateErProRobot> arm_robot_;

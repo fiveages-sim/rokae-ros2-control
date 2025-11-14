@@ -68,7 +68,6 @@ namespace rokae_ros2_control {
         // 读取配置参数
         arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.2.161"));
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.2.233"));
-        rt_network_tolerance_ = get_hardware_parameter("rt_network_tolerance", 20u);  // 默认20%
 
         // 读取阻抗配置参数
         use_impedance_control_ = false;
@@ -132,7 +131,6 @@ namespace rokae_ros2_control {
         RCLCPP_INFO(get_node()->get_logger(), "  Number of joints: %d", joint_count);
         RCLCPP_INFO(get_node()->get_logger(), "  Control mode: %s", 
                     use_impedance_control_ ? "Impedance" : "Position");
-        RCLCPP_INFO(get_node()->get_logger(), "  RT network tolerance: %u%%", rt_network_tolerance_);
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
 
         // 初始化xCoreSDK
@@ -356,16 +354,6 @@ namespace rokae_ros2_control {
 
             if (!rt_controller_) {
                 throw std::runtime_error("Failed to get realtime motion controller");
-            }
-
-            // 设置RT网络容差，提高网络稳定性
-            arm_robot_->setRtNetworkTolerance(rt_network_tolerance_, ec);
-            if (ec) {
-                RCLCPP_WARN(get_node()->get_logger(), 
-                           "Failed to set RT network tolerance: %s", ec.message().c_str());
-            } else {
-                RCLCPP_INFO(get_node()->get_logger(), 
-                           "RT network tolerance set to %u%%", rt_network_tolerance_);
             }
 
             // 初始化实时控制状态
