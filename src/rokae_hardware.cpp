@@ -304,7 +304,7 @@ namespace rokae_ros2_control {
     }
 
     hardware_interface::return_type RokaeHardware::write(
-        const rclcpp::Time &time,
+        const rclcpp::Time & /*time*/,
         const rclcpp::Duration &period) {
         // 启动实时控制线程（类似Dobot的延迟启动策略）
         if (arm_robot_ && !rt_control_running_) {
