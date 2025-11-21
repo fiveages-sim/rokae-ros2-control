@@ -77,7 +77,7 @@ bool JodellGripper::initialize(rokae::xMateErProRobot& robot) {
 
     // 执行初始化命令
     gripInit(robot);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5000));  // 5s用于检查初始化，Jodell电爪初始化需要7s左右
+    // 初始化命令已发送，后台线程会继续处理，无需在此阻塞等待
 
     initialized_ = true;
     return true;

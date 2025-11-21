@@ -43,6 +43,12 @@ namespace rokae_ros2_control {
 
         RCLCPP_INFO(get_node()->get_logger(), "Found %d joints in configuration", joint_count);
 
+        // 计算机械臂关节数量（排除夹爪）
+        int arm_joint_count = joint_count;
+        if (gripper_) {
+            arm_joint_count = joint_count - 1;
+        }
+
         // 读取配置参数的辅助函数（直接从 params 读取）
         // 支持不同类型的参数读取，自动进行类型转换
         const auto get_hardware_parameter = [&params](const std::string &parameter_name, const auto &default_value) {
@@ -87,10 +93,10 @@ namespace rokae_ros2_control {
                 }
             }
 
-            // 验证阻抗参数有效性：数量必须匹配关节数量，且所有值必须大于0
-            if (impedance_values.size() == static_cast<size_t>(joint_count)) {
+            // 验证阻抗参数有效性：数量必须匹配机械臂关节数量（不包括夹爪），且所有值必须大于0
+            if (impedance_values.size() == static_cast<size_t>(arm_joint_count)) {
                 bool all_positive = true;
-                for (size_t i = 0; i < impedance_values.size(); ++i) {
+                for (size_t i = 0; i < impedance_values.size() && i < joint_impedance_.size(); ++i) {
                     if (impedance_values[i] <= 0.0) {
                         all_positive = false;
                         break;
@@ -100,12 +106,12 @@ namespace rokae_ros2_control {
 
                 if (all_positive) {
                     use_impedance_control_ = true;
-                    // 格式化输出阻抗系数
+                    // 格式化输出阻抗系数（只输出机械臂关节的）
                     std::stringstream ss;
                     ss << "Impedance control enabled with coefficients: [";
-                    for (int i = 0; i < joint_count; ++i) {
+                    for (int i = 0; i < arm_joint_count; ++i) {
                         ss << std::fixed << std::setprecision(1) << joint_impedance_[i];
-                        if (i < joint_count - 1) ss << ", ";
+                        if (i < arm_joint_count - 1) ss << ", ";
                     }
                     ss << "]";
                     RCLCPP_INFO(get_node()->get_logger(), "%s", ss.str().c_str());
@@ -115,8 +121,8 @@ namespace rokae_ros2_control {
                 }
             } else {
                 RCLCPP_WARN(get_node()->get_logger(),
-                            "Impedance parameter count (%zu) doesn't match joint count (%d), using position control mode",
-                            impedance_values.size(), joint_count);
+                            "Impedance parameter count (%zu) doesn't match arm joint count (%d), using position control mode",
+                            impedance_values.size(), arm_joint_count);
             }
         }
 
