@@ -104,6 +104,10 @@ namespace rokae_ros2_control {
         std::string local_ip_; // 本地IP地址
         bool use_impedance_control_; // 是否使用阻抗控制模式
         std::array<double, 7> joint_impedance_; // 关节阻抗系数（Nm/rad）
+        bool use_servoj_control_; // 是否使用servoj控制模式
+        double servoj_period_; // servoj发送周期（秒，应与controller_manager的update_rate匹配）
+        double servoj_lookahead_; // servoj前瞻时间（秒）
+        double servoj_kp_; // servoj控制增益
 
         // xCoreSDK相关
         std::unique_ptr<rokae::xMateErProRobot> arm_robot_;

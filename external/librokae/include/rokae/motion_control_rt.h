@@ -115,6 +115,21 @@ namespace rokae {
     */
    void stopMove();
 
+   /**
+    * @brief 发送JointPosition/CartesianPosition/Torque命令。适用于不使用调度周期，程序直接发送命令。
+    * @note 开始运动后，持续调用此函数发送运动命令。由于控制器执行命令的周期为1ms，发送命令的间隔也需要控制在1ms，
+    * 如果发送间隔过长会判断为通信丢包，间隔过短会造成伺服报错。
+    * 直接发送命令的话就不需要用调度周期了，setControlLoop(), startLoop(), stopLoop()等相关函数都不需要。
+    * 实时运动报错可通过BaseRobot::updateRobotState()获知，有报错会抛出异常；
+    * 需要调用Robot_T::startReceiveRobotState()接收数据，建议间隔为1ms，避免报错信息被覆盖
+    * @param[in] cmd 根据控制模式(RtControllerMode)不同，有3种运动命令: 关节角度/笛卡尔位姿/力矩
+    * @throw ArgumentException 指令数值存在非法值
+    * @throw RealtimeStateException 未开始运动
+    * @throw RealtimeControlException 命令发送网络异常; 或命令类型与控制模式不匹配; 或控制器执行已发送命令时发生错误
+    */
+   template<class Command>
+   void sendCommand(const Command &cmd);
+
    // *********************************************************************
    // *****************        获取机器人实时状态数据        ******************
 
@@ -156,6 +171,22 @@ namespace rokae {
    template<typename R>
    [[deprecated("Use BaseRobot::getStateData(fieldName, data) instead")]]
    int getStateData(const std::string &fieldName, R &data);
+
+   // *******************          ServoJ相关          *********************
+
+   /**
+    * @brief 通过实时模式sendCommand下发关节位置，开放调用周期、增益和前瞻时间的设置，且开启servoJ功能
+    * @param[in] ServoJ_T 下发关节位置时调用servoJ的周期, 单位s
+    * @param[in] ServoJ_Lookahead 前瞻时间，对下发关节位置后运动速度的限制, 单位s
+    * @param[in] ServoJ_Kp 控制增益
+    * @param[out] ec 错误码
+    */
+   void setServoJoint(double ServoJ_T, double ServoJ_Lookahead, double ServoJ_Kp, error_code &ec) noexcept;
+
+   /**
+    * @brief 关闭servoJ功能，停止使用setServoJoint需要进行关闭
+    */
+   void stopServoJoint() noexcept;
 
    // *********************************************************************
    // ********************          其他操作            *********************

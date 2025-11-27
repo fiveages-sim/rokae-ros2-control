@@ -71,13 +71,53 @@ namespace rokae_ros2_control {
         arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.2.161"));
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.2.233"));
 
-        // 读取阻抗配置参数
+        // 初始化控制模式标志
+        use_servoj_control_ = false;
         use_impedance_control_ = false;
         std::fill(joint_impedance_.begin(), joint_impedance_.end(), 0.0);
 
-        // 尝试从硬件参数中读取阻抗配置（格式：逗号分隔的数值，如 "500,500,500,500,50,50,50"）
-        if (auto it = params.hardware_info.hardware_parameters.find("joint_impedance");
-            it != params.hardware_info.hardware_parameters.end() && !it->second.empty()) {
+        // 检查servoj参数是否全部配置
+        bool has_servoj_period = params.hardware_info.hardware_parameters.find("servoj_period") != 
+                                  params.hardware_info.hardware_parameters.end();
+        bool has_servoj_lookahead = params.hardware_info.hardware_parameters.find("servoj_lookahead") != 
+                                     params.hardware_info.hardware_parameters.end();
+        bool has_servoj_kp = params.hardware_info.hardware_parameters.find("servoj_kp") != 
+                             params.hardware_info.hardware_parameters.end();
+
+        // 优先级1：如果配置了servoj的所有参数，启用servoj模式
+        if (has_servoj_period && has_servoj_lookahead && has_servoj_kp) {
+            use_servoj_control_ = true;
+            servoj_period_ = get_hardware_parameter("servoj_period", 0.02);
+            servoj_lookahead_ = get_hardware_parameter("servoj_lookahead", 0.06);
+            servoj_kp_ = get_hardware_parameter("servoj_kp", 1.0);
+
+            // 验证servoj参数有效性
+            if (servoj_period_ <= 0.0) {
+                RCLCPP_WARN(get_node()->get_logger(),
+                            "Invalid servoj_period (%.3f), must be positive. Using default 0.02",
+                            servoj_period_);
+                servoj_period_ = 0.02;
+            }
+            if (servoj_lookahead_ <= 0.0) {
+                RCLCPP_WARN(get_node()->get_logger(),
+                            "Invalid servoj_lookahead (%.3f), must be positive. Using default 0.06",
+                            servoj_lookahead_);
+                servoj_lookahead_ = 0.06;
+            }
+            if (servoj_kp_ <= 0.0) {
+                RCLCPP_WARN(get_node()->get_logger(),
+                            "Invalid servoj_kp (%.3f), must be positive. Using default 1.0",
+                            servoj_kp_);
+                servoj_kp_ = 1.0;
+            }
+
+            RCLCPP_INFO(get_node()->get_logger(), 
+                       "ServoJ control enabled (period: %.3f s, lookahead: %.3f s, kp: %.3f)",
+                       servoj_period_, servoj_lookahead_, servoj_kp_);
+        }
+        // 优先级2：如果配置了阻抗参数，启用阻抗控制（仅在servoj未启用时）
+        else if (auto it = params.hardware_info.hardware_parameters.find("joint_impedance");
+                 it != params.hardware_info.hardware_parameters.end() && !it->second.empty()) {
             std::stringstream ss(it->second);
             std::string token;
             std::vector<double> impedance_values;
@@ -125,14 +165,30 @@ namespace rokae_ros2_control {
                             impedance_values.size(), arm_joint_count);
             }
         }
+        // 优先级3：如果servoj参数不完整，给出警告
+        else if (has_servoj_period || has_servoj_lookahead || has_servoj_kp) {
+            RCLCPP_WARN(get_node()->get_logger(),
+                       "Incomplete servoj configuration. Missing parameters: %s%s%s. Using position control mode.",
+                       !has_servoj_period ? "servoj_period " : "",
+                       !has_servoj_lookahead ? "servoj_lookahead " : "",
+                       !has_servoj_kp ? "servoj_kp " : "");
+        }
 
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
         RCLCPP_INFO(get_node()->get_logger(), "RokaeHardware initialized successfully");
         RCLCPP_INFO(get_node()->get_logger(), "  Arm IP: %s", arm_ip_.c_str());
         RCLCPP_INFO(get_node()->get_logger(), "  Local IP: %s", local_ip_.c_str());
         RCLCPP_INFO(get_node()->get_logger(), "  Number of joints: %d", joint_count);
-        RCLCPP_INFO(get_node()->get_logger(), "  Control mode: %s",
-                    use_impedance_control_ ? "Impedance" : "Position");
+        if (use_servoj_control_) {
+            RCLCPP_INFO(get_node()->get_logger(), "  Control mode: ServoJ");
+            RCLCPP_INFO(get_node()->get_logger(), "    Period: %.3f s (%.1f Hz)", 
+                        servoj_period_, 1.0 / servoj_period_);
+            RCLCPP_INFO(get_node()->get_logger(), "    Lookahead: %.3f s", servoj_lookahead_);
+            RCLCPP_INFO(get_node()->get_logger(), "    Kp: %.3f", servoj_kp_);
+        } else {
+            RCLCPP_INFO(get_node()->get_logger(), "  Control mode: %s",
+                        use_impedance_control_ ? "Impedance" : "Position");
+        }
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
 
         // 初始化xCoreSDK
@@ -202,6 +258,15 @@ namespace rokae_ros2_control {
                 RCLCPP_INFO(get_node()->get_logger(), "%s", ss.str().c_str());
             } else {
                 RCLCPP_WARN(get_node()->get_logger(), "Failed to read current position: %s", ec.message().c_str());
+            }
+
+            // servoj模式：在激活时启动实时控制
+            if (use_servoj_control_) {
+                startRealtimeControl();
+                if (!rt_control_running_) {
+                    RCLCPP_ERROR(get_node()->get_logger(), "Failed to start servoj control during activation");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
             }
 
             RCLCPP_INFO(get_node()->get_logger(), "✅ RokaeHardware activated and ready!");
@@ -334,6 +399,26 @@ namespace rokae_ros2_control {
     hardware_interface::return_type RokaeHardware::read(
         const rclcpp::Time & /*time*/,
         const rclcpp::Duration & /*period*/) {
+        if (use_servoj_control_) {
+            // servoj模式：更新机器人状态并读取数据
+            if (arm_robot_) {
+                try {
+                    arm_robot_->updateRobotState(std::chrono::milliseconds(1));
+                    // 直接读取状态数据到数组（servoj模式没有controlLoop回调）
+                    arm_robot_->getStateData(rokae::RtSupportedFields::jointPos_m, joint_positions_array_);
+                    arm_robot_->getStateData(rokae::RtSupportedFields::jointVel_m, joint_velocities_array_);
+                    arm_robot_->getStateData(rokae::RtSupportedFields::tau_m, joint_efforts_array_);
+                } catch (const std::exception &e) {
+                    RCLCPP_ERROR_THROTTLE(
+                        get_node()->get_logger(),
+                        *get_node()->get_clock(),
+                        1000,
+                        "Failed to update robot state: %s", e.what()
+                    );
+                }
+            }
+        }
+
         // 从缓存的状态数据获取关节信息
         if (arm_robot_ && state_receive_started_) {
             for (size_t i = 0; i < joint_names_.size(); ++i) {
@@ -354,24 +439,44 @@ namespace rokae_ros2_control {
     hardware_interface::return_type RokaeHardware::write(
         const rclcpp::Time & /*time*/,
         const rclcpp::Duration &period) {
-        // 启动实时控制线程（类似Dobot的延迟启动策略）
-        if (arm_robot_ && !rt_control_running_) {
-            startRealtimeControl();
+        if (use_servoj_control_) {
+            // servoj模式：直接发送命令（ROS2 Control会按配置频率调用）
+            if (arm_robot_ && rt_controller_ && rt_control_running_) {
+                rokae::JointPosition cmd(joint_position_commands_);
+                try {
+                    rt_controller_->sendCommand(cmd);
+                } catch (const std::exception &e) {
+                    RCLCPP_ERROR_THROTTLE(
+                        get_node()->get_logger(),
+                        *get_node()->get_clock(),
+                        1000,
+                        "Failed to send servoj command: %s", e.what()
+                    );
+                    return hardware_interface::return_type::ERROR;
+                }
+            }
+        } else {
+            // 原有的setControlLoop模式
+            // 启动实时控制线程（类似Dobot的延迟启动策略）
+            if (arm_robot_ && !rt_control_running_) {
+                startRealtimeControl();
+            }
+
+            // 更新命令（自适应频率）
+            // 选项2：从当前插值位置继续（平滑过渡）
+            // 无论上一次插值是否完成，都从当前实际位置（last_sent_joint_positions_）开始新的插值
+            // 这样可以确保即使上一次插值被中断，也能平滑过渡到新目标
+            prev_joint_position_commands_ = last_sent_joint_positions_;
+            // 更新下一次命令（来自控制器）
+            next_joint_position_commands_ = joint_position_commands_;
+
+            // 更新硬件更新周期并预计算alpha增量（从period参数获取）
+            double hw_period = period.seconds();
+            alpha_increment_ = 0.001 / hw_period; // 1kHz回调周期 / 硬件更新周期
+
+            // 重置插值系数为0（开始新的插值周期：从当前位置到新目标）
+            interpolation_alpha_ = 0.0;
         }
-
-        // 更新命令（自适应频率）
-        // 使用上一次实际下发的关节位置作为插值起点（在1kHz callback中记录）
-        // 这样可以避免使用可能有延迟的读取位置
-        prev_joint_position_commands_ = last_sent_joint_positions_;
-        // 更新下一次命令（来自控制器）
-        next_joint_position_commands_ = joint_position_commands_;
-
-        // 更新硬件更新周期并预计算alpha增量（从period参数获取）
-        double hw_period = period.seconds();
-        alpha_increment_ = 0.001 / hw_period; // 1kHz回调周期 / 硬件更新周期
-
-        // 重置插值系数为0（开始新的插值周期）
-        interpolation_alpha_ = 0.0;
 
         // 夹爪控制：检测命令变化并发送
         if (gripper_ && gripper_->isInitialized()) {
@@ -446,19 +551,51 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::startRealtimeControl() {
-        if (rt_control_running_) {
-            return;
-        }
+        if (use_servoj_control_) {
+            // servoj模式：启用servoj功能，但不启动setControlLoop线程
+            if (!rt_controller_) {
+                RCLCPP_ERROR(get_node()->get_logger(), "RT controller not available for servoj mode");
+                return;
+            }
 
-        try {
-            // 启动实时控制线程
-            rt_control_running_ = true;
-            rt_control_thread_ = std::thread(&RokaeHardware::controlLoop, this);
+            try {
+                std::error_code ec;
+                // 启用servoj功能
+                rt_controller_->setServoJoint(servoj_period_, servoj_lookahead_, servoj_kp_, ec);
+                if (ec) {
+                    RCLCPP_ERROR(get_node()->get_logger(),
+                                "Failed to set servoj: %s", ec.message().c_str());
+                    return;
+                }
 
-            RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Failed to start realtime control: %s", e.what());
-            rt_control_running_ = false;
+                // 启动位置控制模式
+                rt_controller_->startMove(rokae::RtControllerMode::jointPosition);
+
+                rt_control_running_ = true;
+                RCLCPP_INFO(get_node()->get_logger(), 
+                           "ServoJ control started (period: %.3f s, lookahead: %.3f s, kp: %.3f)",
+                           servoj_period_, servoj_lookahead_, servoj_kp_);
+            } catch (const std::exception &e) {
+                RCLCPP_ERROR(get_node()->get_logger(), 
+                           "Failed to start servoj control: %s", e.what());
+                rt_control_running_ = false;
+            }
+        } else {
+            // 原有的setControlLoop模式
+            if (rt_control_running_) {
+                return;
+            }
+
+            try {
+                // 启动实时控制线程
+                rt_control_running_ = true;
+                rt_control_thread_ = std::thread(&RokaeHardware::controlLoop, this);
+
+                RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
+            } catch (const std::exception &e) {
+                RCLCPP_ERROR(get_node()->get_logger(), "Failed to start realtime control: %s", e.what());
+                rt_control_running_ = false;
+            }
         }
     }
 
@@ -469,17 +606,32 @@ namespace rokae_ros2_control {
 
         rt_control_running_ = false;
 
-        // 等待线程结束
-        if (rt_control_thread_.joinable()) {
-            rt_control_thread_.join();
-        }
+        if (use_servoj_control_) {
+            // servoj模式：关闭servoj功能
+            if (rt_controller_) {
+                try {
+                    rt_controller_->stopServoJoint();
+                    rt_controller_->stopMove();
+                    RCLCPP_INFO(get_node()->get_logger(), "ServoJ control stopped");
+                } catch (const std::exception &e) {
+                    RCLCPP_ERROR(get_node()->get_logger(), 
+                               "Error stopping servoj control: %s", e.what());
+                }
+            }
+        } else {
+            // 原有的setControlLoop模式
+            // 等待线程结束
+            if (rt_control_thread_.joinable()) {
+                rt_control_thread_.join();
+            }
 
-        // 停止运动
-        if (rt_controller_) {
-            rt_controller_->stopMove();
-        }
+            // 停止运动
+            if (rt_controller_) {
+                rt_controller_->stopMove();
+            }
 
-        RCLCPP_INFO(get_node()->get_logger(), "Realtime control stopped");
+            RCLCPP_INFO(get_node()->get_logger(), "Realtime control stopped");
+        }
     }
 
     void RokaeHardware::controlLoop() {

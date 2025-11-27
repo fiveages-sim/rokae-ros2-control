@@ -51,6 +51,26 @@ namespace rokae {
    double speed_override; ///< 速度覆盖比例
  };
 
+ enum class CANFormat {
+     STANDARD = 0,  // 标准帧
+     EXTENDED = 1   // 扩展帧
+ };
+
+ enum class CANType {
+     CANFD_ACCELERATED,   // CANFD加速
+     CANFD,               // CANFD
+     CAN                  // 经典CAN
+ };
+
+ // 帧结构
+ struct CANFrame {
+     int frame_id;                    // 帧ID
+     int frame_format;                // 帧格式
+     int frame_type;                  // 帧类型
+     std::vector<uint8_t> data;       // CAN数据
+     int frame_valid_length;          // 有效长度
+ };
+
  /**
   * @class BaseRobot
   * @brief 机器人通用接口
@@ -559,6 +579,7 @@ namespace rokae {
     * @param[in] timeout 超时时间
     * @return 接收到的数据长度。如果超时前没有收到数据，那么返回0。
     * @throw RealtimeControlException 无法收到数据；或收到的数据有错误导致无法解析
+    * @throw RealtimeMotionException 实时模式运动报错
     */
    unsigned updateRobotState(std::chrono::steady_clock::duration timeout);
 
@@ -1024,6 +1045,21 @@ namespace rokae {
     * @param[out] ec 错误码
     */
    void XPRS485SendData(int send_byte, int rev_byte, const std::vector<uint8_t>& send_data, std::vector<uint8_t>& rev_data, error_code& ec) noexcept;
+
+   /**
+    * @brief 接收CAN协议裸数据
+    * @param[in] timeout_ms 接收超时时间
+    * @param[in] recv_frame 接收帧数据
+    * @param[out] ec 错误码
+    */
+   void CANReceiveData(int timeout_ms, CANFrame& recv_frame, std::error_code& ec) noexcept;
+
+   /**
+    * @brief 接收CAN协议裸数据
+    * @param[in] send_frame 发送帧数据
+    * @param[out] ec 错误码
+    */
+   void CANSendData(const std::vector<CANFrame>& send_frame, error_code& ec) noexcept;
 
    /**
     * @brief 获取末端按键状态，不支持的机型会返回错误码
