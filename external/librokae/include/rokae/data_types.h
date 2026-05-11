@@ -1,7 +1,7 @@
 ﻿/**
  * @file data_types.h
  * @brief 定义数据结构和枚举类
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -255,7 +255,8 @@ namespace rokae {
  enum class Event {
    moveExecution, ///< 非实时运动指令执行信息
    safety,        ///< 安全 (是否碰撞)
-   rlExecution    ///< RL执行状态
+   rlExecution,   ///< RL执行状态
+   logReporter    ///< 控制器日志上报
  };
 
  /**
@@ -290,6 +291,15 @@ namespace rokae {
    constexpr const char *ExecuteLine = "executeLine"; ///< 执行行号; 类型int
    constexpr const char *ExecuteFile = "executeFile"; ///< 正在执行的文件名; 类型string
   }
+
+  /**
+   * @brief 控制器日志上报
+   */
+  namespace LogReporter {
+   constexpr const char* Ecode = "ecode"; ///< 控制器日志错误码; 类型int
+   constexpr const char* Edetail = "edetail"; ///< 控制器日志报错信息; 类型string
+  }
+
  }
 
 // *******************          Data types            ********************
@@ -369,6 +379,13 @@ namespace rokae {
  class XCORE_API CartesianPosition : public Frame, public Finishable {
   public:
    using Frame::Frame;
+
+   /**
+    * @brief 构造函数
+    * @param values
+    */
+   CartesianPosition(std::initializer_list<double> values);
+
    /**
     * @brief 偏移
     */
@@ -440,7 +457,7 @@ namespace rokae {
   */
  class XCORE_API Torque : public Finishable {
   public:
-   Torque() = default;
+   Torque();
 
    /**
     * @brief constructor
@@ -460,6 +477,11 @@ namespace rokae {
     * @param v 初始值
     */
    Torque(size_t n, double v = 0);
+
+   Torque(const Torque&);
+   Torque& operator=(const Torque&);
+   Torque(Torque&&);
+   Torque& operator=(Torque&&);
 
    std::vector<double> tau; ///< 期望关节扭矩，单位: Nm
  };
@@ -549,7 +571,7 @@ namespace rokae {
    WorkToolInfo(std::string name, bool isHeld, const Frame &posture, const Load &load);
 
    std::string name {};  ///< 名称
-   std::string alias {}; ///< 别名, 暂未使用
+   std::string alias {}; ///< 描述
    bool robotHeld {};    ///< 是否机器人手持
    Frame pos {};         ///< 位姿
    Load load {};         ///< 负载
@@ -699,7 +721,6 @@ namespace rokae {
      fixedAxis  ///< 定轴旋转
    };
 
-   using MoveCCommand::MoveCCommand;
    /**
     * @param target 目标点
     * @param aux 辅助点
@@ -779,6 +800,34 @@ namespace rokae {
    bool key5_state = false; ///< CR5号
    bool key6_state = false; ///< CR6号
    bool key7_state = false; ///< CR7号
+ };
+
+ /**
+  * @brief CAN数据帧格式
+  */
+ enum class CANFormat {
+     STANDARD = 0,  ///< 标准帧
+     EXTENDED = 1   ///< 扩展帧
+ };
+
+ /**
+  * @brief CAN数据帧类型
+  */
+ enum class CANType {
+     CANFD_ACCELERATED,   ///< CANFD加速
+     CANFD,               ///< CANFD
+     CAN                  ///< 经典CAN
+ };
+
+ /**
+  * @brief CAN数据帧结构
+  */
+ struct CANFrame {
+     int frame_id;                    ///< 帧ID
+     int frame_format;                ///< 帧格式
+     int frame_type;                  ///< 帧类型
+     std::vector<uint8_t> data;       ///< CAN数据
+     int frame_valid_length;          ///< 有效长度
  };
 
 #if defined(XCORESDK_SUPPRESS_DLL_WARNING)

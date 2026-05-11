@@ -1,6 +1,6 @@
 ﻿/**
  * @file base.h
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -24,23 +24,21 @@
 /// @cond DO_NOT_DOCUMENT
 
 #if defined(_MSC_VER)
-    #if defined(XCORESDK_DLL_BUILD)
-        #define XCORE_API __declspec(dllexport)
-        #define XCORESDK_SUPPRESS_DLL_WARNING
-    #elif defined(XCORESDK_DLL)
-        #define XCORE_API __declspec(dllimport)
-        #define XCORESDK_SUPPRESS_DLL_WARNING
-    #endif
-#else // if defined(_MSC_VER)
-    #define XCORE_API __attribute__((visibility("default")))
-#endif  // if defined(_MSC_VER)
-
-#if !defined(XCORE_API)
-#define XCORE_API
+ #if defined(XCORESDK_DLL_BUILD)
+  #define XCORE_API __declspec(dllexport)
+  #define XCORESDK_SUPPRESS_DLL_WARNING
+ #elif defined(XCORESDK_DLL)
+  #define XCORE_API __declspec(dllimport)
+  #define XCORESDK_SUPPRESS_DLL_WARNING
+ #else
+  #define XCORE_API
+ #endif
+#else
+ #define XCORE_API __attribute__((visibility("default")))
 #endif
 
 namespace rokae {
-template<class T> struct Base { };
+ template<class T> struct Base { };
 
 }
 

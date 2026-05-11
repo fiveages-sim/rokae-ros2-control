@@ -1,7 +1,7 @@
 ﻿/**
  * @file planner.h
  * @brief 路径规划相关功能
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -37,18 +37,22 @@ namespace rokae {
  class XCORE_API CartMotionGenerator {
   public:
    /**
-    * @brief 根据关节目标位置和速度系数生成一条轴空间轨迹，可用来回零或到达指定位置。
-    * @param[in] speed_factor 速度系数，范围[0, 1].
-    * @param[in] s_goal 目标关节角度
+    * @brief 根据路径总长度和速度系数生成一条笛卡尔空间平滑的轨迹
+    * @param[in] speed_factor 速度系数，范围[0, 1]。最终的速度/加速度 = 最大速度/加速度 * 速度系数
+    * @param[in] s_goal 路径总长度 [m]
     */
    CartMotionGenerator(double speed_factor, double s_goal);
+
+   /**
+    * @brief 析构函数
+    */
    ~CartMotionGenerator();
 
    /**
     * @brief 设置笛卡尔空间运动参数
-    * @param[in] ds_max 最大速度
-    * @param[in] dds_max_start 最大开始加速度
-    * @param[in] dds_max_end 最大结束加速度
+    * @param[in] ds_max 最大速度 [m/s], 默认值1.0m/s。
+    * @param[in] dds_max_start 最大开始加速度 [m/s^2], 默认值2.5m/s2
+    * @param[in] dds_max_end 最大结束加速度 [m/s^2], 默认值2.5m/s2
     */
    void setMax(double ds_max, double dds_max_start, double dds_max_end);
 
@@ -88,17 +92,17 @@ namespace rokae {
   public:
    /**
     * @brief 根据关节目标位置和速度系数生成一条轴空间轨迹，可用来回零或到达指定位置。
-    * @param[in] speed_factor 速度系数，范围[0, 1]
-    * @param[in] q_goal 目标关节角度
+    * @param[in] speed_factor 速度系数，范围[0, 1]。最终的各轴速度/加速度 = 轴空间最大速度/加速度 * 速度系数
+    * @param[in] q_goal 目标关节角度 [rad]
     */
    JointMotionGenerator(double speed_factor, std::array<double, 7> q_goal);
    virtual ~JointMotionGenerator();
 
    /**
-    * @brief 设置轴空间运动参数
-    * @param[in] dq_max 最大速度
-    * @param[in] ddq_max_start 最大开始加速度
-    * @param[in] ddq_max_end 最大结束加速度
+    * @brief 设置轴空间S速度规划的运动参数
+    * @param[in] dq_max 最大速度 [rad/s], 默认值J1~J4 1.0rad/s, J5~J7 1.25rad/s
+    * @param[in] ddq_max_start 最大开始加速度 [rad/s^2], 默认值2.5rad/s^2
+    * @param[in] ddq_max_end 最大结束加速度 [rad/s^2], 默认值2.5rad/s^2
     */
    void setMax(const std::array<double, 7> &dq_max,
                const std::array<double, 7> &ddq_max_start,
@@ -111,7 +115,7 @@ namespace rokae {
 
    /**
     * @brief 计算时间t时的关节角度增量
-    * @param[in] t 时间点
+    * @param[in] t 时间点, 单位秒
     * @param[out] delta_q_d 计算结果
     * @return false: 运动规划没有结束 | true: 运动规划结束
     */
@@ -128,7 +132,7 @@ namespace rokae {
 
 #if defined(XMATEMODEL_LIB_SUPPORTED)
  /**
-  * @brief 点位跟随, 点位可以是笛卡尔位姿或轴角度
+  * @brief 点位跟随, 点位可以是笛卡尔位姿或轴角度，适用于视觉伺服跟随的使用场景
   * @tparam DoF 轴数
   */
  template <unsigned short DoF>
@@ -176,19 +180,23 @@ namespace rokae {
    void stop();
 
    /**
-    * @brief 更新期望的位姿
+    * @brief 更新期望的位姿。
+    * @note 跟随带有加减速过程，在接近目标点时减速，故更新的目标点不宜密集，更新频率不宜过快。更新间隔建议至少几十毫秒的量级
     * @param[in] bMe_desire 末端相对于基坐标系，即TCP位姿
     */
    void update(const Eigen::Transform<double, 3, Eigen::Isometry>& bMe_desire);
 
    /**
     * @brief 更新期望的目标轴角度
+    * @note 跟随带有加减速过程，在接近目标点时减速，故更新的目标点不宜密集，更新频率不宜过快。更新间隔建议至少几十毫秒的量级
     * @param[in] jnt_desired 轴角度, 单位: 弧度
     */
    void update(const std::array<double, DoF>& jnt_desired);
 
    /**
     * @brief 设置速度比例，可在目标跟随的过程中随时调整。
+    * 最终速度受最大值限制，目前数值不能更改。各轴速度最大值为: 120.0, 120.0, 180.0, 180.0, 200.0, 200.0, 200.0 [°/s]；
+    * 各轴加速度最大值为500.0 [°/s^2]
     * @param[in] scale 速度比例，默认为0.5
     */
    void setScale(double scale);
