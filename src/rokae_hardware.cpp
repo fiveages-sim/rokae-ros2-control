@@ -68,8 +68,8 @@ namespace rokae_ros2_control {
         };
 
         // 读取配置参数
-        arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.2.161"));
-        local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.2.233"));
+        arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.1.160"));
+        local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.1.233"));
 
         // 初始化控制模式标志
         use_servoj_control_ = false;
@@ -589,6 +589,7 @@ namespace rokae_ros2_control {
             try {
                 // 启动实时控制线程
                 rt_control_running_ = true;
+                // rt_controller_->setLoopRecvDataTimeout(3);
                 rt_control_thread_ = std::thread(&RokaeHardware::controlLoop, this);
 
                 RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
