@@ -7,6 +7,10 @@
 #include <algorithm>
 
 namespace rokae_ros2_control {
+    RokaeHardware::~RokaeHardware() {
+        shutdownRobot();
+    }
+
     hardware_interface::CallbackReturn RokaeHardware::on_init(
         const hardware_interface::HardwareComponentInterfaceParams &params) {
         if (SystemInterface::on_init(params) != hardware_interface::CallbackReturn::SUCCESS) {
@@ -282,38 +286,7 @@ namespace rokae_ros2_control {
         const rclcpp_lifecycle::State & /* previous_state */) {
         RCLCPP_INFO(get_node()->get_logger(), "Deactivating RokaeHardware...");
 
-        // 停止实时控制
-        if (rt_control_running_) {
-            stopRealtimeControl();
-        }
-
-        // 停止状态更新
-        if (state_update_running_) {
-            stopStateUpdate();
-        }
-
-        // 下电
-        if (arm_robot_) {
-            try {
-                std::error_code ec;
-
-                // 下电
-                arm_robot_->setPowerState(false, ec);
-                if (ec) {
-                    RCLCPP_WARN(get_node()->get_logger(), "Failed to power off arm: %s", ec.message().c_str());
-                }
-
-                // 设置运动控制模式为空闲
-                arm_robot_->setMotionControlMode(rokae::MotionControlMode::Idle, ec);
-                if (ec) {
-                    RCLCPP_WARN(get_node()->get_logger(), "Failed to set arm to idle mode: %s", ec.message().c_str());
-                }
-
-                RCLCPP_INFO(get_node()->get_logger(), "✅ Arm powered off and set to idle mode");
-            } catch (const std::exception &e) {
-                RCLCPP_ERROR(get_node()->get_logger(), "Failed to deactivate arm: %s", e.what());
-            }
-        }
+        shutdownRobot();
 
         RCLCPP_INFO(get_node()->get_logger(), "✅ RokaeHardware deactivated");
 
@@ -502,6 +475,7 @@ namespace rokae_ros2_control {
             }
 
             // 设置运动控制模式为实时模式
+            arm_robot_->setRtNetworkTolerance(100, ec);
             arm_robot_->setMotionControlMode(rokae::MotionControlMode::RtCommand, ec);
             if (ec) {
                 RCLCPP_WARN(get_node()->get_logger(), "Failed to set motion control mode: %s", ec.message().c_str());
@@ -513,6 +487,9 @@ namespace rokae_ros2_control {
             if (!rt_controller_) {
                 throw std::runtime_error("Failed to get realtime motion controller");
             }
+
+            rt_controller_->setFilterLimit(true, 10);
+            rt_controller_->setFilterFrequency(10, 10, 10, ec);
 
             // 初始化实时控制状态
             rt_control_running_ = false;
@@ -589,7 +566,7 @@ namespace rokae_ros2_control {
             try {
                 // 启动实时控制线程
                 rt_control_running_ = true;
-                rt_controller_->setLoopRecvDataTimeout(5);
+                rt_controller_->setLoopRecvDataTimeout(10);
                 rt_control_thread_ = std::thread(&RokaeHardware::controlLoop, this);
 
                 RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
@@ -621,17 +598,72 @@ namespace rokae_ros2_control {
             }
         } else {
             // 原有的setControlLoop模式
-            // 等待线程结束
+            // 先停止SDK实时运动，释放controlLoop中的startLoop(true)，再等待线程退出。
+            if (rt_controller_) {
+                try {
+                    rt_controller_->stopMove();
+                } catch (const std::exception &e) {
+                    RCLCPP_ERROR(get_node()->get_logger(),
+                                 "Error stopping realtime move: %s", e.what());
+                }
+            }
+
             if (rt_control_thread_.joinable()) {
                 rt_control_thread_.join();
             }
 
-            // 停止运动
-            if (rt_controller_) {
-                rt_controller_->stopMove();
+            RCLCPP_INFO(get_node()->get_logger(), "Realtime control stopped");
+        }
+    }
+
+    void RokaeHardware::shutdownRobot() {
+        if (!arm_robot_) {
+            return;
+        }
+
+        try {
+            std::error_code ec;
+            RCLCPP_INFO(get_node()->get_logger(), "Sending arm power-off command before controller cleanup...");
+            arm_robot_->setPowerState(false, ec);
+            if (ec) {
+                RCLCPP_WARN(get_node()->get_logger(), "Early arm power-off command failed: %s", ec.message().c_str());
+            } else {
+                RCLCPP_INFO(get_node()->get_logger(), "Early arm power-off command sent");
+            }
+        } catch (const std::exception &e) {
+            RCLCPP_ERROR(get_node()->get_logger(), "Early arm power-off command threw: %s", e.what());
+        }
+
+        if (rt_control_running_) {
+            stopRealtimeControl();
+        }
+
+        if (state_update_running_) {
+            stopStateUpdate();
+        }
+
+        try {
+            if (state_receive_started_) {
+                arm_robot_->stopReceiveRobotState();
+                state_receive_started_ = false;
+                RCLCPP_INFO(get_node()->get_logger(), "Robot state receiving stopped");
             }
 
-            RCLCPP_INFO(get_node()->get_logger(), "Realtime control stopped");
+            std::error_code ec;
+
+            arm_robot_->setMotionControlMode(rokae::MotionControlMode::Idle, ec);
+            if (ec) {
+                RCLCPP_WARN(get_node()->get_logger(), "Failed to set arm to idle mode: %s", ec.message().c_str());
+            }
+
+            arm_robot_->setPowerState(false, ec);
+            if (ec) {
+                RCLCPP_WARN(get_node()->get_logger(), "Failed to power off arm: %s", ec.message().c_str());
+            } else {
+                RCLCPP_INFO(get_node()->get_logger(), "✅ Arm powered off");
+            }
+        } catch (const std::exception &e) {
+            RCLCPP_ERROR(get_node()->get_logger(), "Failed to shutdown arm safely: %s", e.what());
         }
     }
 

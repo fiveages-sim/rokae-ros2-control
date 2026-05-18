@@ -26,6 +26,8 @@ namespace rokae_ros2_control {
      */
     class RokaeHardware : public hardware_interface::SystemInterface {
     public:
+        ~RokaeHardware() override;
+
         /**
          * @brief 初始化硬件接口
          * @param params 硬件组件接口参数（包含硬件信息、日志记录器等）
@@ -131,6 +133,8 @@ namespace rokae_ros2_control {
         void stopRealtimeControl();
 
         void controlLoop();
+
+        void shutdownRobot();
 
         // 状态更新相关方法
         void startStateUpdate();
