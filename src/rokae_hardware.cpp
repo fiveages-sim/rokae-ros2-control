@@ -589,7 +589,7 @@ namespace rokae_ros2_control {
             try {
                 // 启动实时控制线程
                 rt_control_running_ = true;
-                // rt_controller_->setLoopRecvDataTimeout(3);
+                rt_controller_->setLoopRecvDataTimeout(5);
                 rt_control_thread_ = std::thread(&RokaeHardware::controlLoop, this);
 
                 RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
