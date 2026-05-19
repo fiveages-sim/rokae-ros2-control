@@ -2,6 +2,7 @@
 
 #include <hardware_interface/system_interface.hpp>
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 
@@ -104,20 +105,21 @@ namespace rokae_ros2_control {
         // 配置参数
         std::string arm_ip_; // 机械臂IP地址
         std::string local_ip_; // 本地IP地址
+        size_t arm_joint_count_; // 机械臂关节数量（排除夹爪）
+        std::string ctrl_mode_; // "POSITION" or "JOINT_IMPEDANCE"
         bool use_impedance_control_; // 是否使用阻抗控制模式
         std::array<double, 7> joint_impedance_; // 关节阻抗系数（Nm/rad）
-        bool use_servoj_control_; // 是否使用servoj控制模式
-        double servoj_period_; // servoj发送周期（秒，应与controller_manager的update_rate匹配）
-        double servoj_lookahead_; // servoj前瞻时间（秒）
-        double servoj_kp_; // servoj控制增益
 
         // xCoreSDK相关
         std::unique_ptr<rokae::xMateErProRobot> arm_robot_;
         std::shared_ptr<rokae::RtMotionControlCobot<7> > rt_controller_;
+        rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
         // 实时控制线程
         std::thread rt_control_thread_;
         std::atomic<bool> rt_control_running_;
+        std::atomic<bool> rt_move_restart_requested_;
+        std::mutex control_mode_mutex_;
         std::mutex data_mutex_;
 
         // 状态接收相关
@@ -135,6 +137,16 @@ namespace rokae_ros2_control {
         void controlLoop();
 
         void shutdownRobot();
+
+        void declareControlParameters(
+            const hardware_interface::HardwareComponentInterfaceParams &params);
+
+        rcl_interfaces::msg::SetParametersResult paramCallback(
+            const std::vector<rclcpp::Parameter> &params);
+
+        bool applyControlMode(const std::string &ctrl_mode);
+
+        bool syncPositionCommandsToCurrentState(const std::string &reason);
 
         // 状态更新相关方法
         void startStateUpdate();
