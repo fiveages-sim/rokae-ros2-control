@@ -63,15 +63,19 @@ bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
 
     int current_pos = -1;
     if (gripGetPosition(robot, current_pos)) {
-        physical_position_ = registerToPhysical(current_pos);
-        position_command_ = physical_position_;
-        last_command_ = physical_position_;
+        position_ = registerToNormalized(current_pos);
+        position_command_ = position_;
+        last_command_ = position_;
         RCLCPP_INFO(logger_,
-                    "AG2F90D initial position: register=%d, physical=%.6f m",
+                    "AG2F90D initial position: register=%d, normalized=%.6f",
                     current_pos,
-                    physical_position_);
+                    position_);
     } else {
-        RCLCPP_WARN(logger_, "Failed to read AG2F90D initial position, continuing with initialization");
+        position_ = 0.0;
+        position_command_ = 0.0;
+        last_command_ = 0.0;
+        RCLCPP_WARN(logger_,
+                    "Failed to read AG2F90D initial position, using normalized position 0.0");
     }
 
     if (!gripInit(robot)) {
@@ -91,12 +95,12 @@ bool Ag2f90dGripper::writeCommandPeriodic() {
         return false;
     }
 
-    const double threshold = config_.max_opening_distance * 0.01;
+    const double threshold = 0.01;
     if (std::abs(position_command_ - last_command_) <= threshold) {
         return false;
     }
 
-    const int pos_set = physicalToRegister(position_command_);
+    const int pos_set = normalizedToRegister(position_command_);
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         while (!command_queue_.empty()) {
@@ -212,10 +216,10 @@ void Ag2f90dGripper::readStatusInternal(rokae::xMateErProRobot& robot) {
         return;
     }
 
-    const double new_physical_position = registerToPhysical(current_pos);
+    const double new_position = registerToNormalized(current_pos);
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
-        physical_position_ = new_physical_position;
+        position_ = new_position;
     }
 }
 
@@ -229,8 +233,8 @@ void Ag2f90dGripper::readStatusInBackground() {
         RCLCPP_DEBUG_THROTTLE(logger_,
                               *clock_,
                               1000,
-                              "AG2F90D position updated: %.6f m",
-                              physical_position_);
+                              "AG2F90D position updated: %.6f",
+                              position_);
     } catch (const std::exception& e) {
         RCLCPP_ERROR_THROTTLE(logger_,
                               *clock_,
@@ -298,16 +302,15 @@ void Ag2f90dGripper::commandThreadFunction() {
     }
 }
 
-int Ag2f90dGripper::physicalToRegister(double position_m) const {
-    position_m = std::clamp(position_m, 0.0, config_.max_opening_distance);
-    const double closed_fraction = 1.0 - (position_m / config_.max_opening_distance);
+int Ag2f90dGripper::normalizedToRegister(double normalized_position) const {
+    normalized_position = std::clamp(normalized_position, 0.0, 1.0);
+    const double closed_fraction = 1.0 - normalized_position;
     return static_cast<int>(std::lround(closed_fraction * config_.close_pos));
 }
 
-double Ag2f90dGripper::registerToPhysical(int register_pos) const {
+double Ag2f90dGripper::registerToNormalized(int register_pos) const {
     register_pos = std::clamp(register_pos, OPEN_POS, config_.close_pos);
-    const double open_fraction = 1.0 - (static_cast<double>(register_pos) / config_.close_pos);
-    return open_fraction * config_.max_opening_distance;
+    return 1.0 - (static_cast<double>(register_pos) / config_.close_pos);
 }
 
 void Ag2f90dGripper::exportStateInterfaces(

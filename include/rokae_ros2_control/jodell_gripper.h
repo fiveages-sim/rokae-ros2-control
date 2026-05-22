@@ -99,12 +99,12 @@ private:
     std::string joint_name_;                 // 夹爪关节名称（如果为空则表示未配置夹爪）
 
     // 夹爪状态
-    double position_ = -1.0;                 // 夹爪位置 (0.0-1.0，内部归一化值)
-    double physical_position_ = -1.0;        // 夹爪物理位置 (米，用于hardware interface反馈)
+    double position_ = 0.0;                  // 夹爪位置 (0.0-1.0，内部归一化值)
+    double physical_position_ = 0.0;         // 夹爪物理位置 (米，用于hardware interface反馈)
     double velocity_ = 0.0;                  // 夹爪速度
     double effort_ = 0.0;                    // 夹爪力矩
-    double position_command_ = -1.0;         // 夹爪位置命令 (米，用于hardware interface输入)
-    double last_command_ = -1.0;             // 上一次夹爪命令 (米)
+    double position_command_ = 0.0;          // 夹爪位置命令 (米，用于hardware interface输入)
+    double last_command_ = 0.0;              // 上一次夹爪命令 (米)
     bool stopped_ = true;                    // 夹爪是否停止
     bool initialized_ = false;               // 夹爪是否已初始化
     

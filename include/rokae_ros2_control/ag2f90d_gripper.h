@@ -39,7 +39,7 @@ public:
     const std::string& getJointName() const override { return joint_name_; }
     bool isInitialized() const override { return initialized_; }
 
-    double* getPositionPtr() override { return &physical_position_; }
+    double* getPositionPtr() override { return &position_; }
     double* getVelocityPtr() override { return &velocity_; }
     double* getEffortPtr() override { return &effort_; }
     double* getPositionCommandPtr() override { return &position_command_; }
@@ -72,19 +72,19 @@ private:
     void readStatusInBackground();
     void commandThreadFunction();
 
-    int physicalToRegister(double position_m) const;
-    double registerToPhysical(int register_pos) const;
+    int normalizedToRegister(double normalized_position) const;
+    double registerToNormalized(int register_pos) const;
 
     rclcpp::Logger logger_;
     rclcpp::Clock::SharedPtr clock_;
     std::string joint_name_;
     Config config_;
 
-    double physical_position_ = -1.0;
+    double position_ = 0.0;
     double velocity_ = 0.0;
     double effort_ = 0.0;
-    double position_command_ = -1.0;
-    double last_command_ = -1.0;
+    double position_command_ = 0.0;
+    double last_command_ = 0.0;
     bool initialized_ = false;
 
     std::queue<Command> command_queue_;

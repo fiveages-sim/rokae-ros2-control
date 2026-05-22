@@ -48,5 +48,6 @@ AG2F90D example:
 end-tool 24V and RS485 settings. Set it to `true` only when the robot model and
 controller firmware support configuring xPanel RS485 from the SDK.
 
-The gripper command and state use meters: `0.0` is closed, and
-`gripper_max_opening_distance` is fully open.
+The AG2F90D gripper command and state are normalized: `0.0` is closed, and
+`1.0` is fully open. If a configured gripper is not connected, the exported
+state stays at `0.0` instead of an invalid sentinel value.
