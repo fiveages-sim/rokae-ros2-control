@@ -117,9 +117,14 @@ namespace rokae_ros2_control {
 
         const std::string gripper_joint_name = detectGripperJoint(params.hardware_info.joints);
         if (!gripper_joint_name.empty()) {
-            std::string gripper_type = get_hardware_parameter("gripper_type", std::string("jodell"));
+            std::string gripper_type = get_hardware_parameter("gripper_type", std::string("ag2f90d"));
             std::transform(gripper_type.begin(), gripper_type.end(), gripper_type.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            RCLCPP_INFO(get_node()->get_logger(),
+                        "Detected Rokae gripper joint '%s', gripper_type=%s",
+                        gripper_joint_name.c_str(),
+                        gripper_type.c_str());
 
             if (gripper_type == "jodell") {
                 gripper_ = std::make_unique<JodellGripper>(
