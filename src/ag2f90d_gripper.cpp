@@ -21,6 +21,14 @@ Ag2f90dGripper::Ag2f90dGripper(
     config_.max_opening_distance = std::max(config_.max_opening_distance, 0.001);
     config_.read_interval_ms = std::max(config_.read_interval_ms, 50);
 
+    RCLCPP_INFO(logger_,
+                "AG2F90D gripper configured: joint=%s, slave_id=%d, close_pos=%d, command_range=%.3f, configure_xpanel=%s",
+                joint_name_.c_str(),
+                config_.slave_id,
+                config_.close_pos,
+                config_.max_opening_distance,
+                config_.configure_xpanel ? "true" : "false");
+
     thread_running_ = true;
     command_thread_ = std::thread(&Ag2f90dGripper::commandThreadFunction, this);
 }
@@ -99,10 +107,10 @@ bool Ag2f90dGripper::writeCommandPeriodic() {
     queue_cv_.notify_one();
 
     last_command_ = position_command_;
-    RCLCPP_DEBUG(logger_,
-                 "AG2F90D command queued: %.6f m -> register %d",
-                 position_command_,
-                 pos_set);
+    RCLCPP_INFO(logger_,
+                "AG2F90D command queued: %.6f -> register %d",
+                position_command_,
+                pos_set);
     return true;
 }
 
@@ -278,7 +286,7 @@ void Ag2f90dGripper::commandThreadFunction() {
         if (has_command && robot_ptr_ != nullptr && initialized_) {
             try {
                 gripMove(*robot_ptr_, cmd.pos_set);
-                RCLCPP_DEBUG(logger_, "AG2F90D command sent: register=%d", cmd.pos_set);
+                RCLCPP_INFO(logger_, "AG2F90D command sent: register=%d", cmd.pos_set);
             } catch (const std::exception& e) {
                 RCLCPP_ERROR_THROTTLE(logger_,
                                       *clock_,
