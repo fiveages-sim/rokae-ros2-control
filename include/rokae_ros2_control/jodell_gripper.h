@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rokae_ros2_control/rokae_gripper_interface.h"
+
 #include "rokae/robot.h"
 #include <hardware_interface/hardware_info.hpp>
 #include <hardware_interface/system_interface.hpp>
@@ -21,7 +23,7 @@ namespace rokae_ros2_control {
  * 
  * 封装Jodell电爪的所有参数和控制逻辑，通过Modbus RTU协议与电爪通信
  */
-class JodellGripper {
+class JodellGripper : public RokaeGripperInterface {
 public:
     /**
      * @brief 静态方法：检测关节配置中是否包含夹爪
@@ -41,52 +43,52 @@ public:
     /**
      * @brief 析构函数，清理后台线程
      */
-    ~JodellGripper();
+    ~JodellGripper() override;
 
     /**
      * @brief 初始化夹爪
      * @param robot 机器人对象
      * @return 是否初始化成功
      */
-    bool initialize(rokae::xMateErProRobot& robot);
+    bool initialize(rokae::xMateErProRobot& robot) override;
 
     /**
      * @brief 更新夹爪状态（读取）- 在主循环中调用
      * 注意：实际读取操作在后台线程中异步执行，这里只返回成功
      * @return 是否成功读取
      */
-    bool readStatusPeriodic();
+    bool readStatusPeriodic() override;
 
     /**
      * @brief 处理夹爪命令（写入）- 在主循环中调用，检测命令变化
      * 注意：实际写入操作在后台线程中异步执行
      * @return 是否发送了命令
      */
-    bool writeCommandPeriodic();
+    bool writeCommandPeriodic() override;
 
     // 访问器方法
-    bool hasGripper() const { return !joint_name_.empty(); }
-    const std::string& getJointName() const { return joint_name_; }
-    bool isInitialized() const { return initialized_; }
+    bool hasGripper() const override { return !joint_name_.empty(); }
+    const std::string& getJointName() const override { return joint_name_; }
+    bool isInitialized() const override { return initialized_; }
 
     // 状态数据指针（用于ROS2 Control接口）
     // 注意：position 和 position_command 现在使用物理位置（米）而不是归一化值
-    double* getPositionPtr() { return &physical_position_; }
-    double* getVelocityPtr() { return &velocity_; }
-    double* getEffortPtr() { return &effort_; }
-    double* getPositionCommandPtr() { return &position_command_; }
+    double* getPositionPtr() override { return &physical_position_; }
+    double* getVelocityPtr() override { return &velocity_; }
+    double* getEffortPtr() override { return &effort_; }
+    double* getPositionCommandPtr() override { return &position_command_; }
 
     /**
      * @brief 导出夹爪状态接口到硬件接口列表
      * @param state_interfaces 状态接口列表（会被修改，添加夹爪接口）
      */
-    void exportStateInterfaces(std::vector<hardware_interface::StateInterface::ConstSharedPtr>& state_interfaces);
+    void exportStateInterfaces(std::vector<hardware_interface::StateInterface::ConstSharedPtr>& state_interfaces) override;
 
     /**
      * @brief 导出夹爪命令接口到硬件接口列表
      * @param command_interfaces 命令接口列表（会被修改，添加夹爪接口）
      */
-    void exportCommandInterfaces(std::vector<hardware_interface::CommandInterface::SharedPtr>& command_interfaces);
+    void exportCommandInterfaces(std::vector<hardware_interface::CommandInterface::SharedPtr>& command_interfaces) override;
 
 private:
     // 日志相关
@@ -175,4 +177,3 @@ private:
 };
 
 } // namespace rokae_ros2_control
-
