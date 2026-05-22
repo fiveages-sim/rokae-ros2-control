@@ -35,7 +35,7 @@ AG2F90D example:
   <plugin>rokae_ros2_control/RokaeHardware</plugin>
   <param name="arm_ip">192.168.1.161</param>
   <param name="local_ip">192.168.1.233</param>
-  <param name="gripper_type">ag2f90d</param>
+  <param name="gripper_type">ag2f90_d</param>
   <param name="gripper_slave_id">1</param>
   <param name="gripper_close_pos">9000</param>
   <param name="gripper_max_opening_distance">0.09</param>

@@ -117,7 +117,7 @@ namespace rokae_ros2_control {
 
         const std::string gripper_joint_name = detectGripperJoint(params.hardware_info.joints);
         if (!gripper_joint_name.empty()) {
-            std::string gripper_type = get_hardware_parameter("gripper_type", std::string("ag2f90d"));
+            std::string gripper_type = get_hardware_parameter("gripper_type", std::string("ag2f90_d"));
             std::transform(gripper_type.begin(), gripper_type.end(), gripper_type.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
@@ -131,7 +131,8 @@ namespace rokae_ros2_control {
                     get_node()->get_logger(),
                     get_node()->get_clock(),
                     gripper_joint_name);
-            } else if (gripper_type == "ag2f90d" || gripper_type == "ag2f90" ||
+            } else if (gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
+                       gripper_type == "ag2f90" ||
                        gripper_type == "changingtek90d") {
                 Ag2f90dGripper::Config config;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
