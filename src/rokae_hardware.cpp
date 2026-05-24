@@ -1,4 +1,6 @@
 #include "rokae_ros2_control/rokae_hardware.h"
+#include "rokae_ros2_control/ag2f90d_gripper.h"
+#include "rokae_ros2_control/jodell_gripper.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <sstream>
 #include <iomanip>
@@ -44,6 +46,23 @@ namespace rokae_ros2_control {
             }
             return values.empty() ? default_value : values;
         }
+
+        std::string detectGripperJoint(const std::vector<hardware_interface::ComponentInfo>& joints) {
+            for (const auto& joint : joints) {
+                std::string joint_name_lower = joint.name;
+                std::transform(joint_name_lower.begin(),
+                               joint_name_lower.end(),
+                               joint_name_lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                if (joint_name_lower.find("gripper") != std::string::npos ||
+                    joint_name_lower.find("hand") != std::string::npos) {
+                    return joint.name;
+                }
+            }
+
+            return "";
+        }
     } // namespace
 
     RokaeHardware::~RokaeHardware() {
@@ -74,25 +93,6 @@ namespace rokae_ros2_control {
         last_sent_joint_positions_.resize(joint_count, 0.0);
         interpolation_alpha_ = 0.0; // 初始插值系数为0
 
-        // 检测夹爪，如果检测到则创建夹爪对象
-        std::string gripper_joint_name = JodellGripper::detectGripperJoint(params.hardware_info.joints);
-        if (!gripper_joint_name.empty()) {
-            gripper_ = std::make_unique<JodellGripper>(
-                get_node()->get_logger(), 
-                get_node()->get_clock(), 
-                gripper_joint_name
-            );
-        }
-
-        RCLCPP_INFO(get_node()->get_logger(), "Found %d joints in configuration", joint_count);
-
-        // 计算机械臂关节数量（排除夹爪）
-        int arm_joint_count = joint_count;
-        if (gripper_) {
-            arm_joint_count = joint_count - 1;
-        }
-        arm_joint_count_ = static_cast<size_t>(arm_joint_count);
-
         // 读取配置参数的辅助函数（直接从 params 读取）
         // 支持不同类型的参数读取，自动进行类型转换
         const auto get_hardware_parameter = [&params](const std::string &parameter_name, const auto &default_value) {
@@ -114,6 +114,55 @@ namespace rokae_ros2_control {
         // 读取配置参数
         arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.1.160"));
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.1.233"));
+
+        const std::string gripper_joint_name = detectGripperJoint(params.hardware_info.joints);
+        if (!gripper_joint_name.empty()) {
+            std::string gripper_type = get_hardware_parameter("gripper_type", std::string("ag2f90_d"));
+            std::transform(gripper_type.begin(), gripper_type.end(), gripper_type.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            RCLCPP_INFO(get_node()->get_logger(),
+                        "Detected Rokae gripper joint '%s', gripper_type=%s",
+                        gripper_joint_name.c_str(),
+                        gripper_type.c_str());
+
+            if (gripper_type == "jodell") {
+                gripper_ = std::make_unique<JodellGripper>(
+                    get_node()->get_logger(),
+                    get_node()->get_clock(),
+                    gripper_joint_name);
+            } else if (gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
+                       gripper_type == "ag2f90" ||
+                       gripper_type == "changingtek90d") {
+                Ag2f90dGripper::Config config;
+                config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
+                config.close_pos = get_hardware_parameter("gripper_close_pos", 9000);
+                config.max_opening_distance =
+                    get_hardware_parameter("gripper_max_opening_distance", 0.09);
+                config.configure_xpanel =
+                    get_hardware_parameter("gripper_configure_xpanel", false);
+                config.read_interval_ms =
+                    get_hardware_parameter("gripper_read_interval_ms", 500);
+                gripper_ = std::make_unique<Ag2f90dGripper>(
+                    get_node()->get_logger(),
+                    get_node()->get_clock(),
+                    gripper_joint_name,
+                    config);
+            } else {
+                RCLCPP_WARN(get_node()->get_logger(),
+                            "Unknown Rokae gripper_type '%s', continuing without gripper",
+                            gripper_type.c_str());
+            }
+        }
+
+        RCLCPP_INFO(get_node()->get_logger(), "Found %d joints in configuration", joint_count);
+
+        // 计算机械臂关节数量（排除夹爪）
+        int arm_joint_count = joint_count;
+        if (gripper_) {
+            arm_joint_count = joint_count - 1;
+        }
+        arm_joint_count_ = static_cast<size_t>(arm_joint_count);
 
         // 初始化控制模式标志。启动模式只由 ctrl_mode 参数决定，默认 POSITION。
         use_impedance_control_ = false;
@@ -430,7 +479,7 @@ namespace rokae_ros2_control {
             // 从当前机器人位置初始化命令位置，避免突然跳跃
             auto current_pos = arm_robot_->jointPos(ec);
             if (!ec) {
-                for (size_t i = 0; i < joint_names_.size(); ++i) {
+                for (size_t i = 0; i < arm_joint_count_ && i < current_pos.size(); ++i) {
                     joint_positions_[i] = current_pos[i];
                     joint_position_commands_[i] = current_pos[i];
                     // 初始化插值命令为当前位置
@@ -444,9 +493,9 @@ namespace rokae_ros2_control {
                 // 打印初始位置（动态格式化）
                 std::stringstream ss;
                 ss << "Initial joint positions (rad): [";
-                for (size_t i = 0; i < joint_names_.size(); ++i) {
+                for (size_t i = 0; i < arm_joint_count_ && i < current_pos.size(); ++i) {
                     ss << std::fixed << std::setprecision(3) << current_pos[i];
-                    if (i < joint_names_.size() - 1) ss << ", ";
+                    if (i < arm_joint_count_ - 1) ss << ", ";
                 }
                 ss << "]";
                 RCLCPP_INFO(get_node()->get_logger(), "%s", ss.str().c_str());
@@ -555,7 +604,7 @@ namespace rokae_ros2_control {
         const rclcpp::Duration & /*period*/) {
         // 从缓存的状态数据获取关节信息
         if (arm_robot_ && state_receive_started_) {
-            for (size_t i = 0; i < joint_names_.size(); ++i) {
+            for (size_t i = 0; i < arm_joint_count_; ++i) {
                 joint_positions_[i] = joint_positions_array_[i];
                 joint_velocities_[i] = joint_velocities_array_[i];
                 joint_efforts_[i] = joint_efforts_array_[i];
@@ -797,7 +846,9 @@ namespace rokae_ros2_control {
                                                         (next_joint_position_commands_[i] - prev_joint_position_commands_[
                                                              i]) * interpolation_alpha_;
                     }
-                    command_positions = last_sent_joint_positions_;
+                    command_positions.assign(
+                        last_sent_joint_positions_.begin(),
+                        last_sent_joint_positions_.begin() + static_cast<std::ptrdiff_t>(arm_joint_count_));
                 }
 
                 return rokae::JointPosition(command_positions);

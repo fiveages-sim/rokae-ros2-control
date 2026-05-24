@@ -9,7 +9,7 @@
 // xCoreSDK includes
 #include "rokae/robot.h"
 #include "rokae/motion_control_rt.h"
-#include "rokae_ros2_control/jodell_gripper.h"
+#include "rokae_ros2_control/rokae_gripper_interface.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -93,7 +93,7 @@ namespace rokae_ros2_control {
         std::vector<std::string> joint_names_; // 关节名称列表
 
         // 夹爪控制
-        std::unique_ptr<JodellGripper> gripper_; // Jodell电爪控制器
+        std::unique_ptr<RokaeGripperInterface> gripper_; // 末端夹具控制器
 
         // 命令插值相关（自适应硬件接口频率到1kHz实时控制的插值）
         std::vector<double> prev_joint_position_commands_; // 上一次关节位置命令（用于插值）

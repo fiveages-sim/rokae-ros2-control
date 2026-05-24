@@ -21,3 +21,33 @@ Tested environment:
 cd ~/ros2_ws
 colcon build --packages-up-to rokae_ros2_control --symlink-install
 ```
+
+## 3. Rokae end-tool RS485 gripper
+
+The hardware plugin can control a gripper joint through the robot end-tool
+RS485 Modbus RTU bridge. Add a joint whose name contains `gripper` or `hand`,
+then select the protocol with hardware parameters.
+
+AG2F90D example:
+
+```xml
+<hardware>
+  <plugin>rokae_ros2_control/RokaeHardware</plugin>
+  <param name="arm_ip">192.168.1.161</param>
+  <param name="local_ip">192.168.1.233</param>
+  <param name="gripper_type">ag2f90_d</param>
+  <param name="gripper_slave_id">1</param>
+  <param name="gripper_close_pos">9000</param>
+  <param name="gripper_max_opening_distance">0.09</param>
+  <param name="gripper_configure_xpanel">false</param>
+  <param name="gripper_read_interval_ms">500</param>
+</hardware>
+```
+
+`gripper_configure_xpanel=false` keeps the current controller/RobotAssist
+end-tool 24V and RS485 settings. Set it to `true` only when the robot model and
+controller firmware support configuring xPanel RS485 from the SDK.
+
+The AG2F90D gripper command and state are normalized: `0.0` is closed, and
+`1.0` is fully open. If a configured gripper is not connected, the exported
+state stays at `0.0` instead of an invalid sentinel value.
