@@ -126,11 +126,17 @@ namespace rokae_ros2_control {
                         gripper_joint_name.c_str(),
                         gripper_type.c_str());
 
-            if (gripper_type == "jodell") {
+            if (gripper_type == "jodell" || gripper_type == "rg75" || gripper_type == "dual_rg75") {
+                const double torque_scale =
+                    get_hardware_parameter("gripper_torque_scale", 1.0);
+                const int velocity_command =
+                    get_hardware_parameter("gripper_velocity", 100);
                 gripper_ = std::make_unique<JodellGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
-                    gripper_joint_name);
+                    gripper_joint_name,
+                    torque_scale,
+                    velocity_command);
             } else if (gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
                        gripper_type == "ag2f90" ||
                        gripper_type == "changingtek90d") {

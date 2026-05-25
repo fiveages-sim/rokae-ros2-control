@@ -51,3 +51,18 @@ controller firmware support configuring xPanel RS485 from the SDK.
 The AG2F90D gripper command and state are normalized: `0.0` is closed, and
 `1.0` is fully open. If a configured gripper is not connected, the exported
 state stays at `0.0` instead of an invalid sentinel value.
+
+Jodell RG75 example:
+
+```xml
+<param name="gripper_type">jodell</param>
+<param name="gripper_torque_scale">1.0</param>
+<param name="gripper_velocity">100</param>
+```
+
+For RG75, position remains the physical opening distance in meters
+(`0.0` to `0.038372`) for the RViz prismatic joint. `gripper_torque_scale`
+is clamped to `0.0` to `1.0` and converted to the command force byte
+(`0` to `255`); `gripper_velocity` is the command velocity byte (`0` to
+`255`). Reported `velocity` and `effort` state interfaces expose the raw
+velocity and force bytes read from status register `0x07D2`.
