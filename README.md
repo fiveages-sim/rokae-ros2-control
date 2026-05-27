@@ -52,6 +52,25 @@ The AG2F90D gripper command and state are normalized: `0.0` is closed, and
 `1.0` is fully open. If a configured gripper is not connected, the exported
 state stays at `0.0` instead of an invalid sentinel value.
 
+## 4. Load Configuration
+
+The plugin applies an xCoreSDK `setLoad()` setting when it initializes the
+real-time motion controller. Without a gripper the default load is zero.
+`ag2f90_d` (including the accepted `ag2f90d`, `ag2f90`, and
+`changingtek90d` aliases) selects this identified load automatically:
+
+```xml
+<param name="load_mass">1.2874</param>
+<param name="load_cog">[-0.030145, -0.010147, 0.14785]</param>
+<param name="load_inertia">[0.0, 0.0, 0.0]</param>
+```
+
+The values shown above are the built-in AG2F90 preset, so they do not need to
+be repeated in the hardware XML. These three parameters optionally override
+all or part of the selected preset, which supports newly identified grippers
+without a driver code change. Until an RG75/Jodell load is identified, its
+built-in default remains zero and can be overridden using the same parameters.
+
 Jodell RG75 example:
 
 ```xml
