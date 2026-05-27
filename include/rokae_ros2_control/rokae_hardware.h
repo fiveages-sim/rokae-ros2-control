@@ -132,9 +132,7 @@ namespace rokae_ros2_control {
         // xCoreSDK相关方法
         void initializeXCoreSDK();
 
-        void configureLoad(
-            const hardware_interface::HardwareComponentInterfaceParams &params,
-            const std::string &gripper_type);
+        void configureLoad(const hardware_interface::HardwareComponentInterfaceParams &params);
 
         void applyLoad();
 

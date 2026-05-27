@@ -122,7 +122,6 @@ namespace rokae_ros2_control {
         arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.1.160"));
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.1.233"));
 
-        std::string active_gripper_type;
         const std::string gripper_joint_name = detectGripperJoint(params.hardware_info.joints);
         if (!gripper_joint_name.empty()) {
             std::string gripper_type = get_hardware_parameter("gripper_type", std::string("ag2f90_d"));
@@ -145,7 +144,6 @@ namespace rokae_ros2_control {
                     gripper_joint_name,
                     torque_scale,
                     velocity_command);
-                active_gripper_type = gripper_type;
             } else if (isAg2f90Type(gripper_type)) {
                 Ag2f90dGripper::Config config;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
@@ -161,7 +159,6 @@ namespace rokae_ros2_control {
                     get_node()->get_clock(),
                     gripper_joint_name,
                     config);
-                active_gripper_type = gripper_type;
             } else {
                 RCLCPP_WARN(get_node()->get_logger(),
                             "Unknown Rokae gripper_type '%s', continuing without gripper",
@@ -170,7 +167,7 @@ namespace rokae_ros2_control {
         }
 
         try {
-            configureLoad(params, active_gripper_type);
+            configureLoad(params);
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Invalid load configuration: %s", e.what());
             return hardware_interface::CallbackReturn::ERROR;
@@ -215,17 +212,9 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::configureLoad(
-        const hardware_interface::HardwareComponentInterfaceParams &params,
-        const std::string &gripper_type) {
+        const hardware_interface::HardwareComponentInterfaceParams &params) {
         load_ = rokae::Load {};
         load_profile_ = "zero default";
-
-        if (isAg2f90Type(gripper_type)) {
-            load_.mass = 1.2874;
-            load_.cog = {-0.030145, -0.010147, 0.14785};
-            load_.inertia = {0.0, 0.0, 0.0};
-            load_profile_ = "AG2F90 preset";
-        }
 
         bool has_override = false;
         const auto mass_it = params.hardware_info.hardware_parameters.find("load_mass");
@@ -267,7 +256,7 @@ namespace rokae_ros2_control {
         }
 
         if (has_override) {
-            load_profile_ += " with parameter override";
+            load_profile_ = "hardware parameter configuration";
         }
 
         RCLCPP_INFO(get_node()->get_logger(),
