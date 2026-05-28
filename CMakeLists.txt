@@ -22,6 +22,7 @@ pkg_check_modules(OROCOS_KDL REQUIRED orocos-kdl)
 add_library(${PROJECT_NAME} SHARED
         src/rokae_hardware.cpp
         src/jodell_gripper.cpp
+        src/ag2f90d_gripper.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC

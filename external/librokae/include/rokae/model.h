@@ -1,7 +1,7 @@
 ﻿/**
  * @file model.h
  * @brief xMateModel模型库
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -34,6 +34,15 @@ namespace rokae {
    explicit BaseModel(std::shared_ptr<XService> rpc);
    virtual ~BaseModel();
    /// @endcond
+
+   /**
+    * @brief 计算笛卡尔位姿所有逆解结果。支持除xMateSR(XMS)之外的所有机型
+    * @param[in] posture 笛卡尔位姿，法兰相对与基座标系。其它坐标系需自行转换。
+    * @param[out] confs 对应的confdata，错误码为0时有效
+    * @param[out] ec 错误码，含逆解计算失败错误：-50102奇异点 | -50114 超限位 | -50519 超范围 | -50002 其它逆解错误
+    * @return 逆解结果，单位弧度，错误码为0时有效
+    */
+   std::vector<std::vector<double>> calcAllIkSolutions(const CartesianPosition &posture, std::vector<std::vector<int>> &confs, error_code &ec) noexcept;
 
   XCORESDK_DECLARE_IMPL
  };
@@ -69,26 +78,6 @@ namespace rokae {
     * @return 轴角度, 单位:弧度
     */
    std::array<double,DoF> calcIk(CartesianPosition posture,const Toolset &tool_set, error_code& ec) noexcept;
-
-
-   /**
-    * @brief 根据位姿计算逆解。并自动遍历臂角
-    * @param[in] posture 机器人末端位姿，相对于外部参考坐标系。参考的坐标系是通过setToolset()设置的
-    * @param[in] elb_accuracy 臂角精度
-    * @param[out] ec 错误码
-    * @return 轴角度, 单位:弧度
-    */
-   std::array<double, DoF> calcIk_SearchElbow(CartesianPosition posture, double elb_accuracy, error_code &ec) noexcept;
-
-   /**
-    * @brief 根据位姿计算给定工具工件坐标系下逆解。并自动遍历臂角
-    * @param[in] posture 机器人末端位姿，相对于外部参考坐标系
-    * @param[in] tool_set 工具工件坐标系
-    * @param[in] elb_accuracy 臂角精度
-    * @param[out] ec 错误码
-    * @return 轴角度, 单位:弧度
-    */
-   std::array<double, DoF> calcIk_SearchElbow(CartesianPosition posture,const Toolset &tool_set, double elb_accuracy, error_code& ec) noexcept;
 
    /**
     * @brief 根据轴角度计算正解。
@@ -133,7 +122,8 @@ namespace rokae {
 
  /**
   * @class xMateModel
-  * @brief xMate模型库。支持的机型: xMateER系列, XMC7/12/18/20, XMS3/4
+  * @brief xMate模型库。支持的机型: xMateER系列, XMC7/12, XMS3/4/5。
+  * 注意：对于XMS5机型，需要升级特殊版本的机型文件后方可使用模型库，否则计算结果是错误的，请联系珞石技术支持人员进行机型文件升级。
   * @tparam DoF 轴数
   */
  template <unsigned short DoF>
@@ -213,22 +203,6 @@ namespace rokae {
                     std::array<double, DoF> &jntPos);
 
    /**
-    * @brief 目标比较从[-PI,PI]之间进行遍历，得到其中最近的逆解
-    * @param[in] cartPos 法兰笛卡尔空间位姿
-    * @param[in] psi_accuracy 臂角求解精度，单位度(例如1、10、20)，精度越高，求解时间越长
-    * @param[in] elbow 臂角
-    * @param[in] jntInit 初始关节角度
-    * @param[out] jntPos 关节空间位置
-    * @return 计算逆解结果 -
-    *    1) -1, -2, -3: 无解，原因是cartPos超出机器人工作空间或无解
-    *    2) -4, -5: jntPos与jntInit相差较大，一般认为jntInit代表机器人当前位置，jntPos与jntInit之差可以等效为电机转速。
-    *               若超过机器人轴额定转速，则返回-4或-5;
-    *    3) -6, -7: jntPos超过软限位;
-    *    4)	-8: 机器人奇异；
-    */
-    int getJointPosSearchPsi(const std::array<double, 16> &cartPos, const double& psi_accuracy, double elbow,
-                                  const std::array<double, DoF> &q_init, std::array<double, DoF> &q);
-   /**
     * @brief 逆解获得关节空间速度
     * @param[in] cartVel 法兰笛卡尔空间速度
     * @param[in] jntPos 此时关节角度
@@ -269,46 +243,41 @@ namespace rokae {
                                       SegmentFrame nr = SegmentFrame::flange);
 
    /**
-    * @brief 由模型计算关节力矩
+    * @brief 获取指定坐标系相对于基坐标系的雅克比矩阵时间导数, 行优先
     * @param[in] jntPos 关节角度
     * @param[in] jntVel 关节角速度
-    * @param[in] jntAcc 关节角加速度
-    * @param[in] torque_type 指定力矩类型
-    * @return 计算结果，单位: Nm
+    * @param[in] nr 指定坐标系
+    * @return 计算结果 \f$ \dot{J} \f$, 长度 \f$ \mathbb{R}^{6 \times DoF} \f$
+    * @note 雅克比导数描述了雅克比矩阵随时间的变化率，常用于加速度控制和动力学计算
     */
-   std::array<double, DoF> getTorque(const std::array<double, DoF> &jntPos,
-                                     const std::array<double, DoF> &jntVel,
-                                     const std::array<double, DoF> &jntAcc,
-                                     TorqueType torque_type);
+   std::array<double, DoF*6> jacobianDot(const std::array<double, DoF> &jntPos,
+                                         const std::array<double, DoF> &jntVel,
+                                         SegmentFrame nr = SegmentFrame::flange);
 
    /**
-    * @brief 由模型计算关节力矩，计算结果单位：Nm。如有负载，先通过setLoad()设置负载参数。
+    * @brief 获取指定坐标系相对于基坐标系的雅克比矩阵时间导数, 行优先
     * @param[in] jntPos 关节角度
     * @param[in] jntVel 关节角速度
-    * @param[in] jntAcc 关节角加速度
-    * @param[out] trq_full 总关节力矩
-    * @param[out] trq_inertia 离心力
-    * @param[out] trq_coriolis 科氏力
-    * @param[out] trq_friction 关节摩擦力
-    * @param[out] trq_gravity 重力矩
+    * @param[in] f_t_ee 末端执行器相对于法兰坐标系的位姿
+    * @param[in] ee_t_k 刚度坐标系相对于末端执行器的位姿
+    * @param[in] nr 指定坐标系
+    * @return 计算结果 \f$ \dot{J} \f$, 长度 \f$ \mathbb{R}^{6 \times DoF} \f$
     */
-   void getTorqueWithFriction(const std::array<double, DoF> &jntPos,
-                              const std::array<double, DoF> &jntVel,
-                              const std::array<double, DoF> &jntAcc,
-                              std::array<double, DoF> &trq_full,
-                              std::array<double, DoF> &trq_inertia,
-                              std::array<double, DoF> &trq_coriolis,
-                              std::array<double, DoF> &trq_friction,
-                              std::array<double, DoF> &trq_gravity);
+   std::array<double, DoF*6> jacobianDot(const std::array<double, DoF> &jntPos,
+                                         const std::array<double, DoF> &jntVel,
+                                         const std::array<double, 16> &f_t_ee,
+                                         const std::array<double, 16> &ee_t_k,
+                                         SegmentFrame nr = SegmentFrame::flange);
 
    /**
     * @brief 由模型计算无摩擦力的关节力矩, 计算结果单位: Nm。如有负载，先通过setLoad()设置负载参数。
+    * @note 原getTorque() 和 getTorqueWithFriction不再支持，计算关节力矩都用此接口
     * @param[in] jntPos 关节角度
     * @param[in] jntVel 关节角速度
     * @param[in] jntAcc 关节角加速度
     * @param[out] trq_full 总关节力矩
-    * @param[out] trq_inertia 离心力
-    * @param[out] trq_coriolis 科氏力
+    * @param[out] trq_inertia 惯性力
+    * @param[out] trq_coriolis 科氏力，包括离心力
     * @param[out] trq_gravity 重力矩
     */
    void getTorqueNoFriction(const std::array<double, DoF> &jntPos,
@@ -318,6 +287,25 @@ namespace rokae {
                             std::array<double, DoF> &trq_inertia,
                             std::array<double, DoF> &trq_coriolis,
                             std::array<double, DoF> &trq_gravity);
+
+   /**
+    * @brief 获取关节空间质量矩阵(惯性矩阵)。如有负载，先通过setLoad()设置负载参数。
+    * @param[in] jntPos 关节角度
+    * @return 质量矩阵，行优先存储，长度为 \f$ \mathbb{R}^{DoF \times DoF} \f$
+    * @note 质量矩阵是对称正定矩阵，描述了关节空间的惯性特性。
+    *       矩阵元素 M(i,j) 在数组中的位置为 i*DoF + j
+    */
+   std::array<double, DoF*DoF> getMassMatrix(const std::array<double, DoF> &jntPos);
+
+   /**
+    * @brief 获取离心力和科里奥利力项。如有负载，先通过setLoad()设置负载参数。
+    * @param[in] jntPos 关节角度
+    * @param[in] jntVel 关节速度
+    * @return 离心力和科里奥利力向量，长度为 \f$ \mathbb{R}^{DoF} \f$
+    * @note 这是动力学方程 τ = M(q)q̈ + C(q,q̇) + G(q) 中的 C(q,q̇) 项，
+    *       包含了离心力和科里奥利力的影响。
+    */
+   std::array<double, DoF> getCoriolisVector(const std::array<double, DoF> &jntPos, const std::array<double, DoF> &jntVel);
 
   XCORESDK_DECLARE_IMPLD
  };

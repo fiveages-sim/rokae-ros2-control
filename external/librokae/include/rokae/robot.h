@@ -1,7 +1,7 @@
 ﻿/**
  * @file robot.h
  * @brief 机器人交互接口
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -33,6 +33,7 @@ namespace rokae {
   */
  struct Info {
    std::string id;      ///< 机器人uid, 可用于区分连接的机器人
+   std::string mac;     ///< Mac地址
    std::string version; ///< 控制器版本
    std::string type;    ///< 机器人机型名称
    int joint_num;       ///< 轴数
@@ -49,26 +50,6 @@ namespace rokae {
    std::vector<std::pair<std::string, double>> analog_signals; ///< 模拟量IO, 信号名称及数值
    OperateMode operation_mode; ///< 操作模式
    double speed_override; ///< 速度覆盖比例
- };
-
- enum class CANFormat {
-     STANDARD = 0,  // 标准帧
-     EXTENDED = 1   // 扩展帧
- };
-
- enum class CANType {
-     CANFD_ACCELERATED,   // CANFD加速
-     CANFD,               // CANFD
-     CAN                  // 经典CAN
- };
-
- // 帧结构
- struct CANFrame {
-     int frame_id;                    // 帧ID
-     int frame_format;                // 帧格式
-     int frame_type;                  // 帧类型
-     std::vector<uint8_t> data;       // CAN数据
-     int frame_valid_length;          // 有效长度
  };
 
  /**
@@ -88,6 +69,12 @@ namespace rokae {
     * @param[out] ec 错误码
     */
    void disconnectFromRobot(error_code &ec) noexcept;
+
+   /**
+    * @brief 设置连接断开回调函数
+    * @param[in] handler 回调函数, 参数为bool, true-连接 | false-断开
+    */
+   void setConnectionHandler(const std::function<void(bool)> &handler) noexcept;
 
    // **********************************************************************
    // ***************      Motors power on/off methods      ****************
@@ -126,6 +113,18 @@ namespace rokae {
     */
    void setOperateMode(OperateMode mode, error_code &ec) noexcept;
 
+   /**
+    * @brief 重启工控机 注：在自动模式、下电状态、运动和非空闲状态不允许重启操作
+    * @param[out] ec 错误码
+    */
+   void rebootSystem(error_code& ec) noexcept;
+
+   /**
+    * @brief 关闭工控机。在自动模式、下电状态、运动和非空闲状态不允许重启操作。控制柜断电后重新上电才能重新启动控制器软件。
+    * @param[out] ec 错误码
+    */
+   void shutdownSystem(error_code& ec) noexcept;
+
    // **********************************************************************
    // **************       Get robot information methods      **************
    // **************           查询机器人信息及状态接口           **************
@@ -149,8 +148,8 @@ namespace rokae {
    // ******************           获取机器人位姿接口           ***************
 
    /**
-    * @brief 机器人当前轴角度, 机器人本体+外部轴, 单位: \f$[rad]\f$
-    * 外部轴导轨单位\f$[m]\f$
+    * @brief 机器人当前轴角度, 机器人本体+外部轴, 单位: \f$[rad/m]\f$
+    * 外部轴导轨单位\f$[rad/m]\f$
     * @param[out] ec 错误码
     * @return 长度: \f$ \mathbb{R}^{DoF+ExJnt \times 1} \f$.
     */
@@ -355,9 +354,10 @@ namespace rokae {
     * @param[in] count 查询个数，上限是10条
     * @param[in] level 指定日志等级，空集合代表不指定
     * @param[out] ec 错误码
+    * @param[in] offset 偏移数, 比如0代表从最新的日志开始查询, 10代表从第11条开始查询
     * @return 日志信息
     */
-   std::vector<LogInfo> queryControllerLog(unsigned count, const std::set<LogInfo::Level>& level, error_code &ec) noexcept;
+   std::vector<LogInfo> queryControllerLog(unsigned count, const std::set<LogInfo::Level>& level, error_code &ec, unsigned offset = 0) noexcept;
 
    // **********************************************************************
    // ******************      Motion Controller        *********************
@@ -455,7 +455,7 @@ namespace rokae {
     * @param[in] zone 该接口不对参数进行范围限制。转弯区半径大小实际有效范围是[0, 200]。
     * @param[out] ec 错误码
     */
-   void setDefaultZone(int zone, error_code &ec) noexcept;
+   void setDefaultZone(double zone, error_code &ec) noexcept;
 
    /**
     * @brief 设置是否使用轴配置数据(confData)计算逆解。初始值为false
@@ -466,7 +466,14 @@ namespace rokae {
    void setDefaultConfOpt(bool forced, error_code &ec) noexcept;
 
    /**
-    * @brief 设置最大缓存指令个数，指发送到控制器待规划的路径点个数，允许的范围[1,300]，初始值为30。
+    * @brief 设置运动指令是否使自动取消转弯区。初始值为true
+    * @param[in] enable true - 自动取消转弯区 | false - 不会自动取消转弯区
+    * @param[out] ec 错误码
+    */
+   void setAutoIgnoreZone(bool enable, error_code& ec) noexcept;
+
+   /**
+    * @brief 设置最大缓存指令个数，指发送到控制器待规划的路径点个数，允许的范围[1,1000]，初始值为300。
     * @note 如果轨迹多为短轨迹，可以调大这个数值，避免因指令发送不及时导致机器人停止运动(停止后如果有未执行的指令，可moveStart()继续;
     * @param[in] number 个数
     * @param[out] ec 错误码
@@ -521,6 +528,16 @@ namespace rokae {
     * @param[out] ec 错误码
     */
    void startJog(JogOpt::Space space, double rate, double step, unsigned index, bool direction, error_code &ec) noexcept;
+
+   /**
+    * @param[in] index
+    * @param[in] fixed_name
+    *            fixed_name与index配合使用，fixed_name传入任意字符，is_ext为false，index为0，则jog机器人第一个轴
+    *            fixed_name传入u1，index为0，则jog机械单元u1的第一个轴
+    * @param[in] is_ext:是否为移动外部轴
+    * 其余参数同startJog
+    */
+   void startJogWithExt(JogOpt::Space space, double rate,double step, unsigned int index, bool direction, std::string fixed_name, error_code& ec, bool is_ext = true) noexcept;
 
    /**
     * @brief 执行单条或多条运动指令，调用后机器人立刻开始运动
@@ -596,6 +613,17 @@ namespace rokae {
    template<typename R>
    int getStateData(const std::string &fieldName, R &data);
 
+   // --------------------------------------------------------------------
+   // --------------------        机器人配置            --------------------
+
+   /**
+    * @brief 读取DH参数
+    * @param[in] get_nominal false - 优化后或设置后的参数 | true - 读取标称参数。一般建议使用false
+    * @param[out] ec 错误码
+    * @return DH参数, 错误码为0时有效。依次为各轴的Alpha[°], A[mm], D[mm], Theta[°]
+    */
+   std::vector<double> getRobotCfg_DHparam(bool get_nominal, error_code &ec) noexcept;
+
    //  --------------    MotionControlMode::NrtRLTask   ------------------
    //  ----------------         RL工程相关指令            -------------------
 
@@ -654,6 +682,73 @@ namespace rokae {
     */
    std::vector<WorkToolInfo> wobjsInfo(std::error_code &ec) noexcept;
 
+   /**
+    * @brief 将本地的RL工程压缩包导入控制器。阻塞等到导入完成或失败
+    * @param[in] file_path 本地 .zip压缩包路径, 文件大小在10M以内
+    * @param[in] overwrite 是否覆盖同名文件，是：覆盖；否：自动重命名
+    * @param[out] ec 错误码
+    * @return 工程名（比如自动重命名，返回重命名之后的）
+    */
+   std::string importProject(const std::string &file_path, bool overwrite, error_code &ec) noexcept;
+
+   /**
+    * @brief 删除控制器里的RL工程
+    * @param[in] project_name 工程名
+    * @param[in] remove_all 是否删除所有工程，缺省值是false
+    * @param[out] ec 错误码
+    */
+   void removeProject(const std::string &project_name, error_code &ec, bool remove_all = false) noexcept;
+
+   /**
+    * @brief 导入本地文件到控制器。阻塞等到导入完成或失败
+    * @param[in] src_file_path 本地文件路径。文件大小在10M以内
+    * @param[in] dest 目标路径
+    *   1) 传输单个RL工程 .mod文件: project/[工程名]/[任务名]</[mod文件名]>
+    *   2) 传输RL工程.json/.xml/.sys格式的配置文件: project/[工程名]</[文件名]>。
+    *      注意: 配置文件名称不可更改，比如任务文件名必须是"task.xml"
+    * @param[in] overwrite 覆盖同名文件: true - 覆盖 | false - 自动重命名。仅.mod文件支持自动重命名
+    * @param[out] ec 本地文件不存在; 文件格式错误; 传输失败; 目标路径不符合要求等
+    * @return 导入成功后文件名
+    */
+   std::string importFile(std::string src_file_path, std::string dest, bool overwrite, error_code &ec) noexcept;
+
+   /**
+    * @brief 删除控制器中文件。注: 工程.xml, .json等配置文件不能删除，只能替换
+    * @param[in] file_path_list 文件路径的列表, 单个文件路径如下:
+    *   1) 删除某工程某任务下的 .mod文件: project/[工程名]/[任务名]/[mod文件名]
+    *   2) 删除某工程某任务: project/[工程名]/[任务名]
+    * @param[out] ec 参数格式错误或网络错误。工程或任务或文件不存在不返回错误码
+    */
+   void removeFiles(std::vector<std::string> file_path_list, error_code &ec) noexcept;
+
+   /**
+    * @brief 设置全局工具信息，或新建/设置RL工程中工具的位姿信息和负载信息
+    * @note 说明:
+    *   1) 全局工具: 控制器支持16个全局工具，名称固定为 "g_tool_0" ~ "g_tool_15"
+    *   2) RL工程工具: 使用起来限制条件较多，不建议通过该接口设置工程工具，建议用全局工具。限制条件有:
+    *       a) 需要先加载好一个工程，再设置。只要名称不是全局工具的，都视为工程工具。
+    *       b) 若工具不存在则新建，存在则修改。
+    *       c) 需要配合修改工程的工具配置文件，否则RL指令可能无法正常解析工具信息。并且如果不改配置文件，设置后的数据也不会保存。
+    *   3) 暂不支持设置工具包络信息
+    * @param[in] tool_info 工具信息。
+    * @param[out] ec 全局工具一般不会设置失败。工程中工具可能会设置失败，比如给控制器推送了工程的工具配置文件但是没有重新加载工程，工具配置不一致的情况下会返回错误码
+    */
+   void setToolInfo(const WorkToolInfo &tool_info, error_code &ec) noexcept;
+
+   /**
+    * @brief 设置全局工件信息，或新建/设置RL工程中工件的位姿信息和负载信息
+    * @note 说明:
+    *   1) 全局工件: 控制器支持16个全局工件，名称固定为 "g_wobj_0" ~ "g_wobj_15"
+    *   2) RL工程工件: 使用起来限制条件较多，不建议通过该接口设置工程工件，建议用全局工件。限制条件有:
+    *       a) 需要先加载好一个工程，再设置。只要名称不是全局工件的，都视为工程工件。
+    *       b) 若工件不存在则新建，存在则修改。
+    *       c) 需要配合修改工程的工件配置文件，否则RL指令可能无法正常解析工具信息。并且如果不改配置文件，设置后的数据也不会保存。
+    *   3) 暂不支持设置相关用户坐标系，全局工件默认为"g_user_0", 工程工件默认为 "userframe0"
+    * @param[in] wobj_info 工件信息
+    * @param[out] ec 同理设置工具接口，全局工件一般不会设置失败。工程中工件可能会设置失败
+    */
+   void setWobjInfo(const WorkToolInfo &wobj_info, error_code &ec) noexcept;
+
    // ********************************************************************************
    // ********      Ethercat class for set slaves status/read or write SDO    ********
    // ********         获取ethercat类, 用于切从站状态，读写SDO等             *********
@@ -699,6 +794,55 @@ namespace rokae {
    template<typename R>
    void getRailParameter(const std::string &name, R &value, error_code &ec) noexcept;
 
+    /**
+    * @brief 读取机械单元参数
+    * @tparam R 参数类型
+    * @param[in] name 参数名，u1~u6
+    * @param[in] info 参数名，见value说明
+    * @param[in] value
+    *   参数                         |    参数名             |   数据类型
+    *   机械单元是否激活             | activation            | bool
+    *   轴名称，顺序与设置顺序相同   | axes_info             | std::vector<std::string>
+    *   机械单元是否启用             | enable                | bool
+    *   机械单元固定名称             | fixed_name            | std::string
+    *   机械单元类型                 | mech_link_type        | int
+    *   自定义的机械单元名           | unit_name             | std::string
+    * 0：基座轴   1：变位机  2：伺服焊枪  3：法兰附加轴
+    * @param[out] ec 错误码 参数名不存在或数据类型不匹配返回错误码
+   */
+   template<typename R>
+   void getMechUnit(const std::string &name, const std::string& info, R &value, error_code &ec) noexcept;
+
+   /**
+   * @brief 读取机械单元参数
+   * @tparam R 参数类型
+   * @param[in] name 参数名，axis1~axis6
+   * @param[out] info 参数名，见value说明
+    * @param[in] value
+    *   参数                         |    参数名             |   数据类型
+    *   点位中第几个数据映射         | ext_data_number            | int
+    *   连接的第几个驱动器           | ext_axis_number             | int
+    *   是否是伺服焊枪               | is_servo_gun                | bool
+    *   最大加速度                   | max_acc            | double
+    *   最大加加速度                  | max_jerk        | double
+    *   最大速度                     | max_speed            | double
+    *   软限位下限                   | soft_limit_lower             | double
+    *   软限位上限                   | soft_limit_upper             | double
+    *   零点值                       | zero_value                | int
+    *   电机过载系数                 | motor_overload_coefficient            | int
+    *   电机转矩限幅                 | motor_torque_limiting        | double
+    *   减速比                       | reduction_ratio             | double
+    *   电机额定转矩                 | rated_torque_of_motor            | double
+    *   分辨率                       | resolution_ratio             | int
+    *   关节方向                     | joint_orient                | bool（true为正）
+    *   是否坐标系标定               | coordinate_calibrated            |bool
+    *   驱动器别名/固定名            | driver_name        | std::string
+    * 0：基座轴   1：变位机  2：伺服焊枪  3：法兰附加轴
+    * @param[out] ec 错误码 参数名不存在或数据类型不匹配返回错误码
+   */
+   template<typename R>
+   void getExtAxisInfo(const std::string& name, const std::string& info, R& value, error_code& ec) noexcept;
+
    // *********************************************************************
    // ***********           NTP相关 (非标配功能，需要额外安装)         **********
 
@@ -740,7 +884,7 @@ namespace rokae {
    int checkPath(const std::vector<double> &start_joint,
                  const std::vector<CartesianPosition> &points,
                  std::vector<double> &target_joint_calculated,
-                                 error_code &ec) noexcept;
+                 error_code &ec) noexcept;
 
    /**
     * @brief 检验笛卡尔轨迹是否可达，包括圆弧，全圆
@@ -755,11 +899,18 @@ namespace rokae {
     * @note 支持导轨，返回的目标轴角为轴数+外部轴数
     */
    std::vector<double> checkPath(const CartesianPosition &start,
-                                const std::vector<double> &start_joint,
-                                const CartesianPosition &aux,
-                                const CartesianPosition &target,
-                                error_code &ec, double angle =0.0,
-                                MoveCFCommand::RotType rot_type = MoveCFCommand::constPose) noexcept;
+                                 const std::vector<double> &start_joint,
+                                 const CartesianPosition &aux,
+                                 const CartesianPosition &target,
+                                 error_code &ec, double angle =0.0,
+                                 MoveCFCommand::RotType rot_type = MoveCFCommand::constPose) noexcept;
+
+  /**
+   * @brief 示教器热插拔。注：仅部分机型支持示教器热插拔，不支持的机型会返回错误码。不使用示教器后，使能按键和急停按键将失效。
+   * @param[in] enable true - 使用示教器 | false - 不使用示教器
+   * @param[out] ec 当前机器人状态不能切换(运动中/手动模式上电); 机型等原因切换失败
+   */
+   void setTeachPendantMode(bool enable, error_code& ec) noexcept;
 
    /**
     * @brief 析构Robot对象时会让机器人停止运动
@@ -794,7 +945,7 @@ namespace rokae {
    /**
     * @brief Default constructor, call connectToRobot(remoteIp) afterwards
     */
-   Robot_T() = default;
+   Robot_T();
 
    /**
     * @brief 创建机器人实例, 并连接机器人
@@ -925,8 +1076,8 @@ namespace rokae {
   * @brief 协作机器人通用类
   */
  class XCORE_API BaseCobot: virtual public BaseRobot {
+
   public:
-   using BaseRobot::BaseRobot;
 
    /**
     * @brief 打开拖动
@@ -1010,7 +1161,6 @@ namespace rokae {
     */
    void setxPanelRS485(xPanelOpt::Vout opt, bool if_rs485, error_code& ec) noexcept;
 
-
    /**
     * @brief 通过xPanel末端读写modbus寄存器
     * @param[in] slave_addr 设备地址 0-65535
@@ -1049,17 +1199,19 @@ namespace rokae {
    /**
     * @brief 接收CAN协议裸数据
     * @param[in] timeout_ms 接收超时时间
+    * @param[in] data_type 支持的数据类型  int16、uint16、uint8
     * @param[in] recv_frame 接收帧数据
     * @param[out] ec 错误码
     */
-   void CANReceiveData(int timeout_ms, CANFrame& recv_frame, std::error_code& ec) noexcept;
+   void CANReceiveData(int timeout_ms, std::string data_type, CANFrame& recv_frame, std::error_code& ec) noexcept;
 
    /**
     * @brief 接收CAN协议裸数据
+    * @param[in] data_type 支持的数据类型  int16、uint16、uint8
     * @param[in] send_frame 发送帧数据
     * @param[out] ec 错误码
     */
-   void CANSendData(const std::vector<CANFrame>& send_frame, error_code& ec) noexcept;
+   void CANSendData(std::string data_type, const std::vector<CANFrame>& send_frame, error_code& ec) noexcept;
 
    /**
     * @brief 获取末端按键状态，不支持的机型会返回错误码
@@ -1074,7 +1226,7 @@ namespace rokae {
    /**
     * @brief 设置发送实时运动指令网络延迟阈值，即RobotAssist - RCI设置界面中的”包丢失阈值“。
     * 请在切换到RtCommand模式前进行设置，否则不生效。
-    * @param[in] percent 允许的范围0 - 100
+    * @param[in] percent 允许的范围0 - 100。Linux下运行建议20%以上; Windows下运行建议60%以上
     * @param[out] ec 错误码
     */
    void setRtNetworkTolerance(unsigned percent, error_code& ec) noexcept;
@@ -1096,6 +1248,8 @@ namespace rokae {
     */
    void disableCollisionDetection(error_code& ec) noexcept;
 
+  protected:
+   BaseCobot();
  };
 
  /**
@@ -1209,7 +1363,7 @@ namespace rokae {
    /**
     * @brief default constructor
     */
-   xMateRobot() = default;
+   xMateRobot();
 
    /**
     * @brief 创建机器人实例并连接
@@ -1253,7 +1407,7 @@ namespace rokae {
    /**
 	* @brief default constructor
 	*/
-   xMateCr5Robot() = default;
+   xMateCr5Robot();
 
    /**
 	* @brief 创建机器人实例并连接
@@ -1264,6 +1418,12 @@ namespace rokae {
 	*/
    explicit xMateCr5Robot(const std::string &remoteIP, const std::string& localIP = "");
 
+   /**
+    * @brief 是否使能平行基座模式
+    * @param enable 使能，true: 开启，false: 关闭
+    * @param ec 错误码
+    */
+   void enableCompletePostureLerp(bool enable, error_code& ec) noexcept;
  };
 
  /**
@@ -1275,7 +1435,7 @@ namespace rokae {
    /**
     * @brief default constructor
     */
-   xMateErProRobot() = default;
+   xMateErProRobot();
 
    /**
     * @brief 创建协作7轴机器人实例并连接
@@ -1285,6 +1445,27 @@ namespace rokae {
     * @throw ExecutionException 机器人实例与连接机型不符，或未授权SDK
     */
    explicit xMateErProRobot(const std::string &remoteIP, const std::string& localIP = "");
+ };
+
+ /**
+  * @class ArRobot
+  * @brief AR机型
+  */
+ class XCORE_API ArRobot : public Cobot<7> {
+  public:
+   /**
+    * @brief default constructor
+    */
+   ArRobot();
+
+   /**
+    * @brief 创建协作7轴机器人实例并连接
+    * @param remoteIP 机器人IP地址
+    * @param localIP 本机地址，实时收发数据时需要设置
+    * @throw NetworkException 网络连接错误
+    * @throw ExecutionException 机器人实例与连接机型不符，或未授权SDK
+    */
+   explicit ArRobot(const std::string &remoteIP, const std::string& localIP = "");
  };
 
  /**
@@ -1376,7 +1557,7 @@ namespace rokae {
    /**
     * @brief Default constructor
     */
-   PCB3Robot() = default;
+   PCB3Robot();
 
    /**
     * @brief 创建PCB3机器人实例并连接
@@ -1395,7 +1576,7 @@ namespace rokae {
    /**
     * @brief Default constructor
     */
-   PCB4Robot() = default;
+   PCB4Robot();
 
    /**
     * @brief 创建PCB4机器人实例并连接

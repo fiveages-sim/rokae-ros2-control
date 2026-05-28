@@ -1,7 +1,7 @@
 ﻿/**
  * @file utility.h
  * @brief 数据类型转换
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -15,6 +15,7 @@
 
 #include "base.h"
 #include "robot.h"
+#include "utility.h"
 #include <Eigen/Geometry>
 #include <Eigen/Core>
 #include <Eigen/LU>
@@ -25,7 +26,7 @@ namespace rokae {
   * @class Utils
   * @brief 数据类型转换工具类
   */
- class XCORE_API Utils {
+ class Utils {
 
   public:
 
@@ -189,6 +190,18 @@ namespace rokae {
      Eigen::Quaterniond  quaterniond(w, x, y, z);
      Eigen::Vector3d euler = quaterniond.matrix().eulerAngles(2, 1, 0);
      return { euler(2), euler(1), euler(0) };
+   }
+
+   /**
+    * @brief 欧拉角转四元数
+    * @param[in] rpy 欧拉角, 单位:弧度
+    * @return 四元数 { Q1, Q2, Q3, Q4 }
+    */
+   static std::array<double, 4> eulerToQuaternion(const std::array<double, 3> &rpy) {
+     using namespace Eigen;
+     Quaterniond q = AngleAxisd(rpy[0], Vector3d::UnitX()) * AngleAxisd(rpy[1], Vector3d::UnitY()) *
+       AngleAxisd(rpy[2], Vector3d::UnitZ());
+     return std::array<double, 4>{{ q.coeffs().w(), q.coeffs().x(), q.coeffs().y(), q.coeffs().z() }};
    }
 
    /**

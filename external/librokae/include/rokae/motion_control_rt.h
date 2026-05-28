@@ -1,7 +1,7 @@
 ﻿/**
  * @file motion_control_rt.h
  * @brief 实时模式运动控制
- * @copyright Copyright (C) 2024 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
+ * @copyright Copyright (C) 2025 ROKAE (Beijing) Technology Co., LTD. All Rights Reserved.
  * Information in this file is the intellectual property of Rokae Technology Co., Ltd,
  * And may contains trade secrets that must be stored and viewed confidentially.
  */
@@ -190,11 +190,26 @@ namespace rokae {
 
    // *********************************************************************
    // ********************          其他操作            *********************
+
+   /**
+    * @brief 实时模式运动是否发生了运动错误
+    * @return true - 有报错
+    */
+   bool hasMotionError() noexcept;
+
    /**
     * @brief 当错误发生后，自动恢复机器人。
     * @param[out] ec 错误码
     */
    void automaticErrorRecovery(error_code &ec) noexcept;
+
+   /**
+    * @brief 设置接受数据超时等待时间，初始值为 3ms, 在setCallback() 之前调用生效
+    * 说明: 若设备网络情况较好，并出现控制一段时间之后，发送的运动指令有延迟执行的现象，可适当将超时时间调大。
+    * 效果与本地配置文件 xcoresdk_config.json "_timeout_" 相同, 会覆盖配置文件中设置的值。
+    * @param[in] timeout_ms 超时时间，单位ms, 范围 [1, 20], 建议不要超过10ms
+    */
+   void setLoopRecvDataTimeout(unsigned timeout_ms) noexcept;
 
    /// @cond DO_NOT_DOCUMENT
   XCORESDK_DECLARE_IMPLD
@@ -269,6 +284,7 @@ namespace rokae {
 
    /**
     * @brief MoveJ指令，上位机规划路径，在到达target之前处于处于阻塞状态。如果运动中发生错误将停止阻塞状态并返回。
+    * @note 已不建议使用，请使用非实时模式指令MoveAbsJCommand。
     * @param[in] speed 速度比例系数
     * @param[in] start 起始关节角度，需要是机器人当前关节角度，否则可能造成下电。
     * @param[in] target 机器人目标关节角度
@@ -278,6 +294,7 @@ namespace rokae {
 
    /**
     * @brief MoveL指令，上位机规划路径，在到达target之前处于处于阻塞状态。如果运动中发生错误将停止阻塞状态并返回。
+    * @note 已不建议使用，请使用非实时模式指令MoveLCommand。
     * @param[in] speed 速度比例系数, 范围 0 - 1
     * @param[in] start 起始位姿, 需要是机器人当前位姿，否则可能造成下电。如果设置了TCP，那么应该是工具相对于基坐标系的位姿。
     * @param[in] target 机器人目标位姿。同理如果设置了TCP，应是TCP相对于基坐标系的位姿
@@ -288,6 +305,7 @@ namespace rokae {
 
    /**
     * @brief MoveC指令，在到达target之前处于阻塞状态。如果运动中发生错误将停止阻塞状态并返回。
+    * @note 已不建议使用，请使用非实时模式指令MoveCCommand。
     * @param[in] speed 速度比例系数
     * @param[in] start 机器人起始位姿, 需要是机器人当前位姿。如果设置了TCP，那么应该是工具相对于基坐标系的位姿。
     * @param[in] aux 机器人辅助点位姿。同理如果设置了TCP，应是TCP相对于基坐标系的位姿
