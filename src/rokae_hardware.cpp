@@ -8,6 +8,8 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <stdexcept>
 
 namespace rokae_ros2_control {
     namespace {
@@ -62,6 +64,11 @@ namespace rokae_ros2_control {
             }
 
             return "";
+        }
+
+        bool isAg2f90Type(const std::string &gripper_type) {
+            return gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
+                   gripper_type == "ag2f90" || gripper_type == "changingtek90d";
         }
     } // namespace
 
@@ -126,14 +133,18 @@ namespace rokae_ros2_control {
                         gripper_joint_name.c_str(),
                         gripper_type.c_str());
 
-            if (gripper_type == "jodell") {
+            if (gripper_type == "jodell" || gripper_type == "rg75" || gripper_type == "dual_rg75") {
+                const double torque_scale =
+                    get_hardware_parameter("gripper_torque_scale", 1.0);
+                const int velocity_command =
+                    get_hardware_parameter("gripper_velocity", 100);
                 gripper_ = std::make_unique<JodellGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
-                    gripper_joint_name);
-            } else if (gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
-                       gripper_type == "ag2f90" ||
-                       gripper_type == "changingtek90d") {
+                    gripper_joint_name,
+                    torque_scale,
+                    velocity_command);
+            } else if (isAg2f90Type(gripper_type)) {
                 Ag2f90dGripper::Config config;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
                 config.close_pos = get_hardware_parameter("gripper_close_pos", 9000);
@@ -153,6 +164,13 @@ namespace rokae_ros2_control {
                             "Unknown Rokae gripper_type '%s', continuing without gripper",
                             gripper_type.c_str());
             }
+        }
+
+        try {
+            configureLoad(params);
+        } catch (const std::exception &e) {
+            RCLCPP_ERROR(get_node()->get_logger(), "Invalid load configuration: %s", e.what());
+            return hardware_interface::CallbackReturn::ERROR;
         }
 
         RCLCPP_INFO(get_node()->get_logger(), "Found %d joints in configuration", joint_count);
@@ -191,6 +209,63 @@ namespace rokae_ros2_control {
         }
 
         return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    void RokaeHardware::configureLoad(
+        const hardware_interface::HardwareComponentInterfaceParams &params) {
+        load_ = rokae::Load {};
+        load_profile_ = "zero default";
+
+        bool has_override = false;
+        const auto mass_it = params.hardware_info.hardware_parameters.find("load_mass");
+        if (mass_it != params.hardware_info.hardware_parameters.end()) {
+            load_.mass = std::stod(mass_it->second);
+            if (!std::isfinite(load_.mass) || load_.mass < 0.0) {
+                throw std::invalid_argument("load_mass must be finite and non-negative");
+            }
+            has_override = true;
+        }
+
+        const auto read_array_override =
+            [&params, &has_override](const std::string &name, std::array<double, 3> &target) {
+                const auto it = params.hardware_info.hardware_parameters.find(name);
+                if (it == params.hardware_info.hardware_parameters.end()) {
+                    return;
+                }
+
+                const std::vector<double> parsed = parseDoubleArrayLoose(it->second, {});
+                if (parsed.size() != target.size()) {
+                    throw std::invalid_argument(name + " must contain exactly 3 values");
+                }
+
+                std::copy(parsed.begin(), parsed.end(), target.begin());
+                has_override = true;
+            };
+
+        read_array_override("load_cog", load_.cog);
+        read_array_override("load_inertia", load_.inertia);
+
+        if (std::any_of(load_.cog.begin(), load_.cog.end(),
+                        [](double cog) { return !std::isfinite(cog); })) {
+            throw std::invalid_argument("load_cog values must be finite");
+        }
+
+        if (std::any_of(load_.inertia.begin(), load_.inertia.end(),
+                        [](double inertia) { return !std::isfinite(inertia) || inertia < 0.0; })) {
+            throw std::invalid_argument("load_inertia values must be finite and non-negative");
+        }
+
+        if (has_override) {
+            load_profile_ = "hardware parameter configuration";
+        }
+
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "Configured load (%s): mass=%.6f kg, cog=[%.6f, %.6f, %.6f] m, "
+                    "inertia=[%.6f, %.6f, %.6f] kg*m^2",
+                    load_profile_.c_str(),
+                    load_.mass,
+                    load_.cog[0], load_.cog[1], load_.cog[2],
+                    load_.inertia[0], load_.inertia[1], load_.inertia[2]);
     }
 
     void RokaeHardware::declareControlParameters(
@@ -679,6 +754,8 @@ namespace rokae_ros2_control {
                 throw std::runtime_error("Failed to get realtime motion controller");
             }
 
+            applyLoad();
+
             rt_controller_->setFilterLimit(true, 10);
             rt_controller_->setFilterFrequency(10, 10, 10, ec);
 
@@ -717,6 +794,16 @@ namespace rokae_ros2_control {
             RCLCPP_ERROR(get_node()->get_logger(), "Failed to initialize xCoreSDK: %s", e.what());
             throw;
         }
+    }
+
+    void RokaeHardware::applyLoad() {
+        std::error_code ec;
+        rt_controller_->setLoad(load_, ec);
+        if (ec) {
+            throw std::runtime_error("Failed to set robot load: " + ec.message());
+        }
+
+        RCLCPP_INFO(get_node()->get_logger(), "Applied robot load profile: %s", load_profile_.c_str());
     }
 
     void RokaeHardware::startRealtimeControl() {

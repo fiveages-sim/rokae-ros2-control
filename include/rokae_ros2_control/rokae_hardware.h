@@ -109,6 +109,8 @@ namespace rokae_ros2_control {
         std::string ctrl_mode_; // "POSITION" or "JOINT_IMPEDANCE"
         bool use_impedance_control_; // 是否使用阻抗控制模式
         std::array<double, 7> joint_impedance_; // 关节阻抗系数（Nm/rad）
+        rokae::Load load_; // 机器人法兰端负载参数
+        std::string load_profile_; // 负载参数来源，用于启动日志
 
         // xCoreSDK相关
         std::unique_ptr<rokae::xMateErProRobot> arm_robot_;
@@ -129,6 +131,10 @@ namespace rokae_ros2_control {
 
         // xCoreSDK相关方法
         void initializeXCoreSDK();
+
+        void configureLoad(const hardware_interface::HardwareComponentInterfaceParams &params);
+
+        void applyLoad();
 
         void startRealtimeControl();
 

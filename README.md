@@ -51,3 +51,36 @@ controller firmware support configuring xPanel RS485 from the SDK.
 The AG2F90D gripper command and state are normalized: `0.0` is closed, and
 `1.0` is fully open. If a configured gripper is not connected, the exported
 state stays at `0.0` instead of an invalid sentinel value.
+
+## 4. Load Configuration
+
+The plugin applies an xCoreSDK `setLoad()` setting when it initializes the
+real-time motion controller. The default load is zero for every gripper type
+and for configurations without a gripper. Configure identified load data
+explicitly in hardware parameters. For an AG2F90 with the currently identified
+values:
+
+```xml
+<param name="load_mass">1.2874</param>
+<param name="load_cog">[-0.030145, -0.010147, 0.14785]</param>
+<param name="load_inertia">[0.0, 0.0, 0.0]</param>
+```
+
+The three parameters may also be provided partially; unspecified components
+remain zero. This keeps newly identified grippers configurable without a
+driver code change.
+
+Jodell RG75 example:
+
+```xml
+<param name="gripper_type">jodell</param>
+<param name="gripper_torque_scale">1.0</param>
+<param name="gripper_velocity">100</param>
+```
+
+For RG75, position remains the physical opening distance in meters
+(`0.0` to `0.038372`) for the RViz prismatic joint. `gripper_torque_scale`
+is clamped to `0.0` to `1.0` and converted to the command force byte
+(`0` to `255`); `gripper_velocity` is the command velocity byte (`0` to
+`255`). Reported `velocity` and `effort` state interfaces expose the raw
+velocity and force bytes read from status register `0x07D2`.

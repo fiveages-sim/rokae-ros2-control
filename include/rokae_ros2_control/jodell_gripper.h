@@ -38,7 +38,12 @@ public:
      * @param clock ROS2时钟（用于限流日志）
      * @param joint_name 夹爪关节名称（如果为空字符串，则表示未配置夹爪）
      */
-    JodellGripper(rclcpp::Logger logger, rclcpp::Clock::SharedPtr clock, const std::string& joint_name = "");
+    JodellGripper(
+        rclcpp::Logger logger,
+        rclcpp::Clock::SharedPtr clock,
+        const std::string& joint_name = "",
+        double torque_scale = 1.0,
+        int velocity_command = 100);
 
     /**
      * @brief 析构函数，清理后台线程
@@ -97,15 +102,19 @@ private:
 
     // 夹爪配置
     std::string joint_name_;                 // 夹爪关节名称（如果为空则表示未配置夹爪）
+    int command_torque_ = 255;               // 命令力矩原始字节值 (0-255)
+    int command_velocity_ = 100;             // 命令速度原始字节值 (0-255)
 
     // 夹爪状态
     double position_ = 0.0;                  // 夹爪位置 (0.0-1.0，内部归一化值)
     double physical_position_ = 0.0;         // 夹爪物理位置 (米，用于hardware interface反馈)
-    double velocity_ = 0.0;                  // 夹爪速度
-    double effort_ = 0.0;                    // 夹爪力矩
+    double velocity_ = 0.0;                  // 夹爪速度状态（设备原始字节值 0-255）
+    double effort_ = 0.0;                    // 夹爪力状态（设备原始字节值 0-255）
     double position_command_ = 0.0;          // 夹爪位置命令 (米，用于hardware interface输入)
     double last_command_ = 0.0;              // 上一次夹爪命令 (米)
     bool stopped_ = true;                    // 夹爪是否停止
+    uint8_t status_byte_ = 0;                // 状态字节
+    uint8_t error_code_ = 0;                 // 错误码字节
     bool initialized_ = false;               // 夹爪是否已初始化
     
     // 物理参数
@@ -127,6 +136,8 @@ private:
     // 状态读取相关（异步读取）
     std::mutex status_mutex_;                // 状态数据互斥锁
     static constexpr int READ_INTERVAL_MS = 500;  // 后台线程读取间隔（毫秒），2Hz
+    static constexpr int INIT_POLL_INTERVAL_MS = 100;
+    static constexpr int INIT_TIMEOUT_MS = 10000;
 
     // Modbus RTU 通信参数
     static constexpr int SLAVE_ADDRESS = 9;           // 从站地址
@@ -139,13 +150,13 @@ private:
     /**
      * @brief Jodell电爪初始化（通过Modbus RTU）
      */
-    void gripInit(rokae::xMateErProRobot& robot);
+    bool gripInit(rokae::xMateErProRobot& robot);
 
     /**
      * @brief Jodell电爪运动控制（通过Modbus RTU）
      * @param robot 机器人对象
-     * @param trq_set 力矩设置 (20-100)
-     * @param vel_set 速度设置 (1-100)
+     * @param trq_set 力矩设置 (0-255)
+     * @param vel_set 速度设置 (0-255)
      * @param pos_set 位置设置 (0-255)
      */
     void gripMove(rokae::xMateErProRobot& robot, int trq_set, int vel_set, int pos_set);
@@ -156,16 +167,17 @@ private:
      * @param init_status 输出初始化状态
      * @return 是否初始化完成
      */
-    bool gripGetInitStatus(rokae::xMateErProRobot& robot, uint8_t& init_status);
+    bool gripGetInitStatus(rokae::xMateErProRobot& robot, uint8_t& init_status, bool& init_finished);
 
     /**
      * @brief 获取Jodell电爪状态
      * @param robot 机器人对象
      * @param robot_stats 输出状态数据 [状态, 位置/错误, 力/速度]
      */
-    void gripGetStatus(rokae::xMateErProRobot& robot, std::vector<int>& robot_stats);
+    bool gripGetStatus(rokae::xMateErProRobot& robot, std::vector<int>& robot_stats);
 
     // 内部辅助方法 - 状态处理
+    void updateStatusFromRegisters(const std::vector<int>& robot_stats);
     void readStatusInternal(rokae::xMateErProRobot& robot);
     void sendCommand(rokae::xMateErProRobot& robot, int pos_set, int trq_set, int vel_set);
     
