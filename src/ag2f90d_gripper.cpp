@@ -20,6 +20,10 @@ Ag2f90dGripper::Ag2f90dGripper(
     config_.close_pos = std::max(config_.close_pos, OPEN_POS);
     config_.max_opening_distance = std::max(config_.max_opening_distance, 0.001);
     config_.read_interval_ms = std::max(config_.read_interval_ms, 50);
+    config_.normalized_torque = std::clamp(config_.normalized_torque, 0.0, 1.0);
+    config_.normalized_velocity = std::clamp(config_.normalized_velocity, 0.0, 1.0);
+    command_torque_ = static_cast<int>(config_.normalized_torque * 255.0);
+    command_velocity_ = static_cast<int>(std::round(config_.normalized_velocity * 255.0));
     if (config_.model_name.empty()) {
         config_.model_name = "AG2F90D";
     }
@@ -48,6 +52,21 @@ Ag2f90dGripper::~Ag2f90dGripper() {
     if (command_thread_.joinable()) {
         command_thread_.join();
     }
+}
+
+void Ag2f90dGripper::setToolDynamics(double normalized_torque, double normalized_velocity) {
+    std::lock_guard<std::mutex> lock(dynamics_mutex_);
+    config_.normalized_torque = std::clamp(normalized_torque, 0.0, 1.0);
+    config_.normalized_velocity = std::clamp(normalized_velocity, 0.0, 1.0);
+    const int next_torque = static_cast<int>(config_.normalized_torque * 255.0);
+    const int next_velocity = static_cast<int>(std::round(config_.normalized_velocity * 255.0));
+    if (next_torque == command_torque_ && next_velocity == command_velocity_) {
+        return;
+    }
+
+    command_torque_ = next_torque;
+    command_velocity_ = next_velocity;
+    dynamics_dirty_ = true;
 }
 
 bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
@@ -104,7 +123,12 @@ bool Ag2f90dGripper::writeCommandPeriodic() {
     }
 
     const double threshold = 0.01;
-    if (std::abs(position_command_ - last_command_) <= threshold) {
+    bool dynamics_dirty = false;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        dynamics_dirty = dynamics_dirty_;
+    }
+    if (std::abs(position_command_ - last_command_) <= threshold && !dynamics_dirty) {
         return false;
     }
 
@@ -119,6 +143,10 @@ bool Ag2f90dGripper::writeCommandPeriodic() {
     queue_cv_.notify_one();
 
     last_command_ = position_command_;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        dynamics_dirty_ = false;
+    }
     RCLCPP_INFO(logger_,
                 "%s command queued: %.6f -> register %d",
                 config_.model_name.c_str(),
@@ -170,6 +198,39 @@ bool Ag2f90dGripper::gripMove(rokae::xMateErProRobot& robot, int pos_set) {
         return false;
     }
 
+    if (!acceleration_set_) {
+        if (!writeSingleRegister(robot, config_.acceleration_reg, config_.default_acceleration, "acceleration")) {
+            return false;
+        }
+        acceleration_set_ = true;
+    }
+    if (!deceleration_set_) {
+        if (!writeSingleRegister(robot, config_.deceleration_reg, config_.default_deceleration, "deceleration")) {
+            return false;
+        }
+        deceleration_set_ = true;
+    }
+    int command_velocity = 0;
+    int command_torque = 0;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        command_velocity = command_velocity_;
+        command_torque = command_torque_;
+    }
+
+    if (command_velocity != cached_velocity_reg_) {
+        if (!writeSingleRegister(robot, config_.velocity_reg, command_velocity, "velocity")) {
+            return false;
+        }
+        cached_velocity_reg_ = command_velocity;
+    }
+    if (command_torque != cached_torque_reg_) {
+        if (!writeSingleRegister(robot, config_.torque_reg, command_torque, "torque")) {
+            return false;
+        }
+        cached_torque_reg_ = command_torque;
+    }
+
     std::vector<int> trigger_vec = {TRIGGER_MOVE};
     robot.XPRWModbusRTUReg(config_.slave_id,
                            WRITE_SINGLE_REG,
@@ -185,6 +246,34 @@ bool Ag2f90dGripper::gripMove(rokae::xMateErProRobot& robot, int pos_set) {
         return false;
     }
 
+    return true;
+}
+
+bool Ag2f90dGripper::writeSingleRegister(
+    rokae::xMateErProRobot& robot,
+    int reg,
+    int value,
+    const char* label) {
+    std::error_code ec;
+    std::vector<int> values = {value};
+    robot.XPRWModbusRTUReg(config_.slave_id,
+                           WRITE_SINGLE_REG,
+                           reg,
+                           "int16",
+                           1,
+                           values,
+                           false,
+                           ec);
+    if (ec) {
+        RCLCPP_ERROR(logger_,
+                     "%s %s write failed (reg=0x%04X, value=%d): %s",
+                     config_.model_name.c_str(),
+                     label,
+                     reg,
+                     value,
+                     ec.message().c_str());
+        return false;
+    }
     return true;
 }
 

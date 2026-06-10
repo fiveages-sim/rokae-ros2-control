@@ -41,6 +41,8 @@ AG2F90C/AG2F90D example:
   <param name="gripper_max_opening_distance">0.09</param>
   <param name="gripper_configure_xpanel">false</param>
   <param name="gripper_read_interval_ms">500</param>
+  <param name="right_tool_torque">1.0</param>
+  <param name="right_tool_velocity">1.0</param>
 </hardware>
 ```
 
@@ -51,10 +53,16 @@ controller firmware support configuring xPanel RS485 from the SDK.
 Supported ChangingTek aliases are `ag2f90_c`, `ag2f90c`, `ag2f90`,
 `changingtek90c`, `ag2f90_d`, `ag2f90d`, and `changingtek90d`. The driver uses
 the matching feedback register for the C/D variant; `gripper_feedback_reg` can
-override it for unusual firmware. The AG2F90 command and state are normalized:
-`0.0` is closed, and `1.0` is fully open. If a configured gripper is not
-connected, the exported state stays at `0.0` instead of an invalid sentinel
-value.
+override it for unusual firmware. Tool dynamics follow the Tianji convention:
+`left_tool_torque`, `left_tool_velocity`, `right_tool_torque`, and
+`right_tool_velocity` are normalized `0.0` to `1.0` values and can be updated at
+runtime with `ros2 param set`. AG2F90 maps velocity and torque to registers
+`0x0104` and `0x0105`; these, plus acceleration/deceleration registers, can be
+overridden with `gripper_velocity_reg`, `gripper_torque_reg`,
+`gripper_acceleration_reg`, and `gripper_deceleration_reg`. The AG2F90 command
+and state are normalized: `0.0` is closed, and `1.0` is fully open. If a
+configured gripper is not connected, the exported state stays at `0.0` instead
+of an invalid sentinel value.
 
 ## 4. Load Configuration
 
@@ -78,13 +86,13 @@ Jodell RG75 example:
 
 ```xml
 <param name="gripper_type">jodell</param>
-<param name="gripper_torque_scale">1.0</param>
-<param name="gripper_velocity">100</param>
+<param name="left_tool_torque">1.0</param>
+<param name="left_tool_velocity">1.0</param>
 ```
 
 For RG75, position remains the physical opening distance in meters
-(`0.0` to `0.038372`) for the RViz prismatic joint. `gripper_torque_scale`
-is clamped to `0.0` to `1.0` and converted to the command force byte
-(`0` to `255`); `gripper_velocity` is the command velocity byte (`0` to
-`255`). Reported `velocity` and `effort` state interfaces expose the raw
-velocity and force bytes read from status register `0x07D2`.
+(`0.0` to `0.038372`) for the RViz prismatic joint. The preferred dynamics
+parameters are the normalized Tianji-style `*_tool_torque` and
+`*_tool_velocity`; they are converted to the RG75 force and velocity bytes
+(`0` to `255`). Reported `velocity` and `effort` state interfaces expose the
+raw velocity and force bytes read from status register `0x07D2`.

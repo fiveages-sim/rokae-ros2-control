@@ -23,6 +23,14 @@ public:
         bool configure_xpanel = false;
         int read_interval_ms = 500;
         int feedback_reg = 0x0418;
+        int velocity_reg = 0x0104;
+        int torque_reg = 0x0105;
+        int acceleration_reg = 0x0106;
+        int deceleration_reg = 0x0107;
+        int default_acceleration = 2000;
+        int default_deceleration = 2000;
+        double normalized_torque = 1.0;
+        double normalized_velocity = 1.0;
         std::string model_name = "AG2F90D";
     };
 
@@ -45,6 +53,7 @@ public:
     double* getVelocityPtr() override { return &velocity_; }
     double* getEffortPtr() override { return &effort_; }
     double* getPositionCommandPtr() override { return &position_command_; }
+    void setToolDynamics(double normalized_torque, double normalized_velocity) override;
 
     void exportStateInterfaces(
         std::vector<hardware_interface::StateInterface::ConstSharedPtr>& state_interfaces) override;
@@ -71,6 +80,7 @@ private:
 
     bool gripInit(rokae::xMateErProRobot& robot);
     bool gripMove(rokae::xMateErProRobot& robot, int pos_set);
+    bool writeSingleRegister(rokae::xMateErProRobot& robot, int reg, int value, const char* label);
     bool gripGetPosition(rokae::xMateErProRobot& robot, int& pos_now_get);
     void readStatusInternal(rokae::xMateErProRobot& robot);
     void readStatusInBackground();
@@ -89,6 +99,14 @@ private:
     double effort_ = 0.0;
     double position_command_ = 0.0;
     double last_command_ = 0.0;
+    int command_torque_ = 255;
+    int command_velocity_ = 255;
+    int cached_torque_reg_ = -1;
+    int cached_velocity_reg_ = -1;
+    bool dynamics_dirty_ = false;
+    std::mutex dynamics_mutex_;
+    bool acceleration_set_ = false;
+    bool deceleration_set_ = false;
     bool initialized_ = false;
 
     std::queue<Command> command_queue_;
