@@ -28,14 +28,14 @@ The hardware plugin can control a gripper joint through the robot end-tool
 RS485 Modbus RTU bridge. Add a joint whose name contains `gripper` or `hand`,
 then select the protocol with hardware parameters.
 
-AG2F90D example:
+AG2F90C/AG2F90D example:
 
 ```xml
 <hardware>
   <plugin>rokae_ros2_control/RokaeHardware</plugin>
   <param name="arm_ip">192.168.0.160</param>
   <param name="local_ip">192.168.0.233</param>
-  <param name="gripper_type">ag2f90_d</param>
+  <param name="gripper_type">ag2f90_c</param>
   <param name="gripper_slave_id">1</param>
   <param name="gripper_close_pos">9000</param>
   <param name="gripper_max_opening_distance">0.09</param>
@@ -48,9 +48,13 @@ AG2F90D example:
 end-tool 24V and RS485 settings. Set it to `true` only when the robot model and
 controller firmware support configuring xPanel RS485 from the SDK.
 
-The AG2F90D gripper command and state are normalized: `0.0` is closed, and
-`1.0` is fully open. If a configured gripper is not connected, the exported
-state stays at `0.0` instead of an invalid sentinel value.
+Supported ChangingTek aliases are `ag2f90_c`, `ag2f90c`, `ag2f90`,
+`changingtek90c`, `ag2f90_d`, `ag2f90d`, and `changingtek90d`. The driver uses
+the matching feedback register for the C/D variant; `gripper_feedback_reg` can
+override it for unusual firmware. The AG2F90 command and state are normalized:
+`0.0` is closed, and `1.0` is fully open. If a configured gripper is not
+connected, the exported state stays at `0.0` instead of an invalid sentinel
+value.
 
 ## 4. Load Configuration
 

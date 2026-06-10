@@ -22,6 +22,8 @@ public:
         double max_opening_distance = 0.09;
         bool configure_xpanel = false;
         int read_interval_ms = 500;
+        int feedback_reg = 0x0418;
+        std::string model_name = "AG2F90D";
     };
 
     Ag2f90dGripper(
@@ -49,6 +51,9 @@ public:
     void exportCommandInterfaces(
         std::vector<hardware_interface::CommandInterface::SharedPtr>& command_interfaces) override;
 
+    static constexpr int FEEDBACK_REG_D = 0x0418;
+    static constexpr int FEEDBACK_REG_C = 0x060D;
+
 private:
     struct Command {
         int pos_set;
@@ -60,7 +65,6 @@ private:
     static constexpr int INIT_REG = 0x0100;
     static constexpr int POS_REG = 0x0102;
     static constexpr int TRIGGER_REG = 0x0108;
-    static constexpr int FEEDBACK_REG = 0x0418;
     static constexpr int POWER_ON = 0x0001;
     static constexpr int TRIGGER_MOVE = 0x0001;
     static constexpr int OPEN_POS = 0;

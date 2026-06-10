@@ -72,9 +72,18 @@ namespace rokae_ros2_control {
             return "";
         }
 
-        bool isAg2f90Type(const std::string &gripper_type) {
+        bool isAg2f90CType(const std::string &gripper_type) {
+            return gripper_type == "ag2f90_c" || gripper_type == "ag2f90c" ||
+                   gripper_type == "ag2f90" || gripper_type == "changingtek90c";
+        }
+
+        bool isAg2f90DType(const std::string &gripper_type) {
             return gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
-                   gripper_type == "ag2f90" || gripper_type == "changingtek90d";
+                   gripper_type == "changingtek90d";
+        }
+
+        bool isAg2f90Type(const std::string &gripper_type) {
+            return isAg2f90CType(gripper_type) || isAg2f90DType(gripper_type);
         }
     } // namespace
 
@@ -294,6 +303,15 @@ namespace rokae_ros2_control {
                     get_hardware_parameter("gripper_configure_xpanel", false);
                 config.read_interval_ms =
                     get_hardware_parameter("gripper_read_interval_ms", 500);
+                if (isAg2f90CType(gripper_type)) {
+                    config.model_name = "AG2F90C";
+                    config.feedback_reg = Ag2f90dGripper::FEEDBACK_REG_C;
+                } else {
+                    config.model_name = "AG2F90D";
+                    config.feedback_reg = Ag2f90dGripper::FEEDBACK_REG_D;
+                }
+                config.feedback_reg =
+                    get_hardware_parameter("gripper_feedback_reg", config.feedback_reg);
                 gripper_ = std::make_unique<Ag2f90dGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
