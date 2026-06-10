@@ -90,10 +90,49 @@ namespace rokae_ros2_control {
         std::vector<double> joint_position_commands_; // 关节位置命令（弧度）
         std::vector<double> joint_velocities_commands_; // 关节速度命令（弧度）
         std::vector<double> joint_efforts_commands_; // 关节力矩命令（牛顿）
+        std::vector<double> target_joint_position_commands_; // 最新上层位置命令（由1kHz滤波器跟踪）
         std::vector<std::string> joint_names_; // 关节名称列表
 
         // 夹爪控制
         std::unique_ptr<RokaeGripperInterface> gripper_; // 末端夹具控制器
+
+        struct DoubleSFilter {
+            double v_min{-3.0};
+            double v_max{3.0};
+            double a_min{-10.0};
+            double a_max{10.0};
+            double jerk_limit{100.0};
+            double dt{0.001};
+            double q{0.0};
+            double qd{0.0};
+            double qdd{0.0};
+
+            void reset(double position, double velocity = 0.0, double acceleration = 0.0);
+            double updateTo(double target_position, double target_velocity = 0.0, double target_acceleration = 0.0);
+
+        private:
+            static int sign(double value);
+            double getJerk(double target_position, double target_velocity, double target_acceleration) const;
+            double accelControl(double error_acceleration, double acceleration_limit) const;
+            double velocityBoundary(double error_acceleration, double error_velocity, double velocity_limit) const;
+            double velocityControl(
+                double min_error_acceleration,
+                double max_error_acceleration,
+                double error_acceleration,
+                double error_velocity,
+                double velocity_limit) const;
+        };
+
+        std::vector<DoubleSFilter> command_filters_;
+        bool use_double_s_filter_{true};
+        double command_filter_max_velocity_{6.0};
+        double command_filter_max_acceleration_{30.0};
+        double command_filter_max_jerk_{300.0};
+        bool sdk_filter_limit_enable_{true}; // Rokae SDK 内部实时命令滤波开关
+        int sdk_filter_limit_{10};
+        int sdk_filter_frequency_1_{10};
+        int sdk_filter_frequency_2_{10};
+        int sdk_filter_frequency_3_{10};
 
         // 命令插值相关（自适应硬件接口频率到1kHz实时控制的插值）
         std::vector<double> prev_joint_position_commands_; // 上一次关节位置命令（用于插值）
@@ -108,6 +147,8 @@ namespace rokae_ros2_control {
         size_t arm_joint_count_; // 机械臂关节数量（排除夹爪）
         std::string ctrl_mode_; // "POSITION" or "JOINT_IMPEDANCE"
         bool use_impedance_control_; // 是否使用阻抗控制模式
+        int rt_cpu_affinity_{-1}; // 实时控制线程 CPU 绑定（-1 表示不绑定）
+        int state_cpu_affinity_{-1}; // 状态更新线程 CPU 绑定（-1 表示不绑定）
         std::array<double, 7> joint_impedance_; // 关节阻抗系数（Nm/rad）
         rokae::Load load_; // 机器人法兰端负载参数
         std::string load_profile_; // 负载参数来源，用于启动日志
@@ -154,11 +195,15 @@ namespace rokae_ros2_control {
 
         bool syncPositionCommandsToCurrentState(const std::string &reason);
 
+        void resetCommandFilters(const std::vector<double> &positions);
+
         // 状态更新相关方法
         void startStateUpdate();
 
         void stopStateUpdate();
 
         void stateUpdateLoop();
+
+        void bindThreadToCpu(std::thread &thread, int cpu_id, const std::string &thread_name);
     };
 } // namespace rokae_ros2_control

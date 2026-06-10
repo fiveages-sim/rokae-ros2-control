@@ -33,8 +33,8 @@ AG2F90D example:
 ```xml
 <hardware>
   <plugin>rokae_ros2_control/RokaeHardware</plugin>
-  <param name="arm_ip">192.168.2.161</param>
-  <param name="local_ip">192.168.2.234</param>
+  <param name="arm_ip">192.168.0.160</param>
+  <param name="local_ip">192.168.0.233</param>
   <param name="gripper_type">ag2f90_d</param>
   <param name="gripper_slave_id">1</param>
   <param name="gripper_close_pos">9000</param>
