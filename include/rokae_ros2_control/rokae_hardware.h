@@ -128,11 +128,6 @@ namespace rokae_ros2_control {
         double command_filter_max_velocity_{6.0};
         double command_filter_max_acceleration_{30.0};
         double command_filter_max_jerk_{300.0};
-        bool sdk_filter_limit_enable_{true}; // Rokae SDK 内部实时命令滤波开关
-        int sdk_filter_limit_{10};
-        int sdk_filter_frequency_1_{10};
-        int sdk_filter_frequency_2_{10};
-        int sdk_filter_frequency_3_{10};
 
         // 命令插值相关（自适应硬件接口频率到1kHz实时控制的插值）
         std::vector<double> prev_joint_position_commands_; // 上一次关节位置命令（用于插值）

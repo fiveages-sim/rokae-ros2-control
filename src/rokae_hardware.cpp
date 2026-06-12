@@ -18,6 +18,11 @@ namespace rokae_ros2_control {
     namespace {
         constexpr double kRealtimeControlDt = 0.001;
         constexpr double kEpsilon = 1.0e-9;
+        constexpr bool kSdkFilterLimitEnable = true;
+        constexpr int kSdkFilterLimit = 10;
+        constexpr int kSdkFilterJointFrequency = 10;
+        constexpr int kSdkFilterCartesianFrequency = 10;
+        constexpr int kSdkFilterTorqueFrequency = 10;
 
         std::string normalizeControlMode(const std::string &mode) {
             std::string normalized = mode;
@@ -233,6 +238,7 @@ namespace rokae_ros2_control {
         prev_joint_position_commands_.resize(joint_count, 0.0);
         next_joint_position_commands_.resize(joint_count, 0.0);
         last_sent_joint_positions_.resize(joint_count, 0.0);
+        alpha_increment_ = 1.0;
         interpolation_alpha_ = 0.0; // 初始插值系数为0
 
         // 读取配置参数的辅助函数（直接从 params 读取）
@@ -271,16 +277,6 @@ namespace rokae_ros2_control {
             std::abs(get_hardware_parameter("command_filter_max_acceleration", command_filter_max_acceleration_));
         command_filter_max_jerk_ =
             std::abs(get_hardware_parameter("command_filter_max_jerk", command_filter_max_jerk_));
-        sdk_filter_limit_enable_ =
-            get_hardware_parameter("sdk_filter_limit_enable", sdk_filter_limit_enable_);
-        sdk_filter_limit_ =
-            std::max(0, get_hardware_parameter("sdk_filter_limit", sdk_filter_limit_));
-        sdk_filter_frequency_1_ =
-            std::max(0, get_hardware_parameter("sdk_filter_frequency_1", sdk_filter_frequency_1_));
-        sdk_filter_frequency_2_ =
-            std::max(0, get_hardware_parameter("sdk_filter_frequency_2", sdk_filter_frequency_2_));
-        sdk_filter_frequency_3_ =
-            std::max(0, get_hardware_parameter("sdk_filter_frequency_3", sdk_filter_frequency_3_));
 
         const std::string gripper_joint_name = detectGripperJoint(params.hardware_info.joints);
         if (!gripper_joint_name.empty()) {
@@ -393,13 +389,6 @@ namespace rokae_ros2_control {
                     command_filter_max_velocity_,
                     command_filter_max_acceleration_,
                     command_filter_max_jerk_);
-        RCLCPP_INFO(get_node()->get_logger(),
-                    "  SDK filter: limit_enable=%s, limit=%d, frequency=(%d,%d,%d)",
-                    sdk_filter_limit_enable_ ? "true" : "false",
-                    sdk_filter_limit_,
-                    sdk_filter_frequency_1_,
-                    sdk_filter_frequency_2_,
-                    sdk_filter_frequency_3_);
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
 
         // 初始化xCoreSDK
@@ -1065,12 +1054,12 @@ namespace rokae_ros2_control {
 
             applyLoad();
 
-            rt_controller_->setFilterLimit(sdk_filter_limit_enable_, sdk_filter_limit_);
-            if (sdk_filter_limit_enable_) {
+            rt_controller_->setFilterLimit(kSdkFilterLimitEnable, kSdkFilterLimit);
+            if (kSdkFilterLimitEnable) {
                 rt_controller_->setFilterFrequency(
-                    sdk_filter_frequency_1_,
-                    sdk_filter_frequency_2_,
-                    sdk_filter_frequency_3_,
+                    kSdkFilterJointFrequency,
+                    kSdkFilterCartesianFrequency,
+                    kSdkFilterTorqueFrequency,
                     ec);
                 if (ec) {
                     RCLCPP_WARN(get_node()->get_logger(),
