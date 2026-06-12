@@ -42,8 +42,8 @@ public:
         rclcpp::Logger logger,
         rclcpp::Clock::SharedPtr clock,
         const std::string& joint_name = "",
-        double torque_scale = 1.0,
-        int velocity_command = 100);
+        double normalized_torque = 1.0,
+        double normalized_velocity = 1.0);
 
     /**
      * @brief 析构函数，清理后台线程
@@ -82,6 +82,7 @@ public:
     double* getVelocityPtr() override { return &velocity_; }
     double* getEffortPtr() override { return &effort_; }
     double* getPositionCommandPtr() override { return &position_command_; }
+    void setToolDynamics(double normalized_torque, double normalized_velocity) override;
 
     /**
      * @brief 导出夹爪状态接口到硬件接口列表
@@ -104,6 +105,7 @@ private:
     std::string joint_name_;                 // 夹爪关节名称（如果为空则表示未配置夹爪）
     int command_torque_ = 255;               // 命令力矩原始字节值 (0-255)
     int command_velocity_ = 100;             // 命令速度原始字节值 (0-255)
+    std::mutex dynamics_mutex_;
 
     // 夹爪状态
     double position_ = 0.0;                  // 夹爪位置 (0.0-1.0，内部归一化值)
@@ -113,6 +115,7 @@ private:
     double position_command_ = 0.0;          // 夹爪位置命令 (米，用于hardware interface输入)
     double last_command_ = 0.0;              // 上一次夹爪命令 (米)
     bool stopped_ = true;                    // 夹爪是否停止
+    bool dynamics_dirty_ = false;            // 速度/力矩参数是否需要重发
     uint8_t status_byte_ = 0;                // 状态字节
     uint8_t error_code_ = 0;                 // 错误码字节
     bool initialized_ = false;               // 夹爪是否已初始化

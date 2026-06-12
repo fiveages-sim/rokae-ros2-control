@@ -20,13 +20,22 @@ Ag2f90dGripper::Ag2f90dGripper(
     config_.close_pos = std::max(config_.close_pos, OPEN_POS);
     config_.max_opening_distance = std::max(config_.max_opening_distance, 0.001);
     config_.read_interval_ms = std::max(config_.read_interval_ms, 50);
+    config_.normalized_torque = std::clamp(config_.normalized_torque, 0.0, 1.0);
+    config_.normalized_velocity = std::clamp(config_.normalized_velocity, 0.0, 1.0);
+    command_torque_ = static_cast<int>(config_.normalized_torque * 255.0);
+    command_velocity_ = static_cast<int>(std::round(config_.normalized_velocity * 255.0));
+    if (config_.model_name.empty()) {
+        config_.model_name = "AG2F90D";
+    }
 
     RCLCPP_INFO(logger_,
-                "AG2F90D gripper configured: joint=%s, slave_id=%d, close_pos=%d, command_range=%.3f, configure_xpanel=%s",
+                "%s gripper configured: joint=%s, slave_id=%d, close_pos=%d, command_range=%.3f, feedback_reg=0x%04X, configure_xpanel=%s",
+                config_.model_name.c_str(),
                 joint_name_.c_str(),
                 config_.slave_id,
                 config_.close_pos,
                 config_.max_opening_distance,
+                config_.feedback_reg,
                 config_.configure_xpanel ? "true" : "false");
 
     thread_running_ = true;
@@ -45,6 +54,21 @@ Ag2f90dGripper::~Ag2f90dGripper() {
     }
 }
 
+void Ag2f90dGripper::setToolDynamics(double normalized_torque, double normalized_velocity) {
+    std::lock_guard<std::mutex> lock(dynamics_mutex_);
+    config_.normalized_torque = std::clamp(normalized_torque, 0.0, 1.0);
+    config_.normalized_velocity = std::clamp(normalized_velocity, 0.0, 1.0);
+    const int next_torque = static_cast<int>(config_.normalized_torque * 255.0);
+    const int next_velocity = static_cast<int>(std::round(config_.normalized_velocity * 255.0));
+    if (next_torque == command_torque_ && next_velocity == command_velocity_) {
+        return;
+    }
+
+    command_torque_ = next_torque;
+    command_velocity_ = next_velocity;
+    dynamics_dirty_ = true;
+}
+
 bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
     robot_ptr_ = &robot;
 
@@ -53,11 +77,12 @@ bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
         robot.setxPanelRS485(rokae::xPanelOpt::Vout::supply24v, true, ec);
         if (ec) {
             RCLCPP_ERROR(logger_,
-                         "Failed to enable Rokae xPanel 24V/RS485 for AG2F90D: %s",
+                         "Failed to enable Rokae xPanel 24V/RS485 for %s: %s",
+                         config_.model_name.c_str(),
                          ec.message().c_str());
             return false;
         }
-        RCLCPP_INFO(logger_, "Rokae xPanel 24V/RS485 enabled for AG2F90D");
+        RCLCPP_INFO(logger_, "Rokae xPanel 24V/RS485 enabled for %s", config_.model_name.c_str());
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
@@ -67,7 +92,8 @@ bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
         position_command_ = position_;
         last_command_ = position_;
         RCLCPP_INFO(logger_,
-                    "AG2F90D initial position: register=%d, normalized=%.6f",
+                    "%s initial position: register=%d, normalized=%.6f",
+                    config_.model_name.c_str(),
                     current_pos,
                     position_);
     } else {
@@ -75,7 +101,8 @@ bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
         position_command_ = 0.0;
         last_command_ = 0.0;
         RCLCPP_WARN(logger_,
-                    "Failed to read AG2F90D initial position, using normalized position 0.0");
+                    "Failed to read %s initial position, using normalized position 0.0",
+                    config_.model_name.c_str());
     }
 
     if (!gripInit(robot)) {
@@ -96,7 +123,12 @@ bool Ag2f90dGripper::writeCommandPeriodic() {
     }
 
     const double threshold = 0.01;
-    if (std::abs(position_command_ - last_command_) <= threshold) {
+    bool dynamics_dirty = false;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        dynamics_dirty = dynamics_dirty_;
+    }
+    if (std::abs(position_command_ - last_command_) <= threshold && !dynamics_dirty) {
         return false;
     }
 
@@ -111,8 +143,13 @@ bool Ag2f90dGripper::writeCommandPeriodic() {
     queue_cv_.notify_one();
 
     last_command_ = position_command_;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        dynamics_dirty_ = false;
+    }
     RCLCPP_INFO(logger_,
-                "AG2F90D command queued: %.6f -> register %d",
+                "%s command queued: %.6f -> register %d",
+                config_.model_name.c_str(),
                 position_command_,
                 pos_set);
     return true;
@@ -130,11 +167,12 @@ bool Ag2f90dGripper::gripInit(rokae::xMateErProRobot& robot) {
                            false,
                            ec);
     if (ec) {
-        RCLCPP_ERROR(logger_, "AG2F90D initialization failed: %s", ec.message().c_str());
+        RCLCPP_ERROR(logger_, "%s initialization failed: %s",
+                     config_.model_name.c_str(), ec.message().c_str());
         return false;
     }
 
-    RCLCPP_INFO(logger_, "AG2F90D initialized");
+    RCLCPP_INFO(logger_, "%s initialized", config_.model_name.c_str());
     return true;
 }
 
@@ -153,10 +191,44 @@ bool Ag2f90dGripper::gripMove(rokae::xMateErProRobot& robot, int pos_set) {
                            ec);
     if (ec) {
         RCLCPP_ERROR(logger_,
-                     "AG2F90D position write failed (register=%d): %s",
+                     "%s position write failed (register=%d): %s",
+                     config_.model_name.c_str(),
                      pos_set,
                      ec.message().c_str());
         return false;
+    }
+
+    if (!acceleration_set_) {
+        if (!writeSingleRegister(robot, config_.acceleration_reg, config_.default_acceleration, "acceleration")) {
+            return false;
+        }
+        acceleration_set_ = true;
+    }
+    if (!deceleration_set_) {
+        if (!writeSingleRegister(robot, config_.deceleration_reg, config_.default_deceleration, "deceleration")) {
+            return false;
+        }
+        deceleration_set_ = true;
+    }
+    int command_velocity = 0;
+    int command_torque = 0;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        command_velocity = command_velocity_;
+        command_torque = command_torque_;
+    }
+
+    if (command_velocity != cached_velocity_reg_) {
+        if (!writeSingleRegister(robot, config_.velocity_reg, command_velocity, "velocity")) {
+            return false;
+        }
+        cached_velocity_reg_ = command_velocity;
+    }
+    if (command_torque != cached_torque_reg_) {
+        if (!writeSingleRegister(robot, config_.torque_reg, command_torque, "torque")) {
+            return false;
+        }
+        cached_torque_reg_ = command_torque;
     }
 
     std::vector<int> trigger_vec = {TRIGGER_MOVE};
@@ -169,10 +241,39 @@ bool Ag2f90dGripper::gripMove(rokae::xMateErProRobot& robot, int pos_set) {
                            false,
                            ec);
     if (ec) {
-        RCLCPP_ERROR(logger_, "AG2F90D trigger write failed: %s", ec.message().c_str());
+        RCLCPP_ERROR(logger_, "%s trigger write failed: %s",
+                     config_.model_name.c_str(), ec.message().c_str());
         return false;
     }
 
+    return true;
+}
+
+bool Ag2f90dGripper::writeSingleRegister(
+    rokae::xMateErProRobot& robot,
+    int reg,
+    int value,
+    const char* label) {
+    std::error_code ec;
+    std::vector<int> values = {value};
+    robot.XPRWModbusRTUReg(config_.slave_id,
+                           WRITE_SINGLE_REG,
+                           reg,
+                           "int16",
+                           1,
+                           values,
+                           false,
+                           ec);
+    if (ec) {
+        RCLCPP_ERROR(logger_,
+                     "%s %s write failed (reg=0x%04X, value=%d): %s",
+                     config_.model_name.c_str(),
+                     label,
+                     reg,
+                     value,
+                     ec.message().c_str());
+        return false;
+    }
     return true;
 }
 
@@ -181,7 +282,7 @@ bool Ag2f90dGripper::gripGetPosition(rokae::xMateErProRobot& robot, int& pos_now
     std::vector<int> pos_now_get_vec = {0, 0};
     robot.XPRWModbusRTUReg(config_.slave_id,
                            READ_HOLDING_REGS,
-                           FEEDBACK_REG,
+                           config_.feedback_reg,
                            "int16",
                            2,
                            pos_now_get_vec,
@@ -191,7 +292,8 @@ bool Ag2f90dGripper::gripGetPosition(rokae::xMateErProRobot& robot, int& pos_now
         RCLCPP_WARN_THROTTLE(logger_,
                              *clock_,
                              2000,
-                             "AG2F90D position read failed: %s",
+                             "%s position read failed: %s",
+                             config_.model_name.c_str(),
                              ec.message().c_str());
         return false;
     }
@@ -233,13 +335,15 @@ void Ag2f90dGripper::readStatusInBackground() {
         RCLCPP_DEBUG_THROTTLE(logger_,
                               *clock_,
                               1000,
-                              "AG2F90D position updated: %.6f",
+                              "%s position updated: %.6f",
+                              config_.model_name.c_str(),
                               position_);
     } catch (const std::exception& e) {
         RCLCPP_ERROR_THROTTLE(logger_,
                               *clock_,
                               2000,
-                              "Failed to read AG2F90D state: %s",
+                              "Failed to read %s state: %s",
+                              config_.model_name.c_str(),
                               e.what());
     }
 }
@@ -290,12 +394,14 @@ void Ag2f90dGripper::commandThreadFunction() {
         if (has_command && robot_ptr_ != nullptr && initialized_) {
             try {
                 gripMove(*robot_ptr_, cmd.pos_set);
-                RCLCPP_INFO(logger_, "AG2F90D command sent: register=%d", cmd.pos_set);
+                RCLCPP_INFO(logger_, "%s command sent: register=%d",
+                            config_.model_name.c_str(), cmd.pos_set);
             } catch (const std::exception& e) {
                 RCLCPP_ERROR_THROTTLE(logger_,
                                       *clock_,
                                       1000,
-                                      "Failed to send AG2F90D command: %s",
+                                      "Failed to send %s command: %s",
+                                      config_.model_name.c_str(),
                                       e.what());
             }
         }

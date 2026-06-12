@@ -27,6 +27,8 @@ public:
     virtual double* getEffortPtr() = 0;
     virtual double* getPositionCommandPtr() = 0;
 
+    virtual void setToolDynamics(double normalized_torque, double normalized_velocity) = 0;
+
     virtual void exportStateInterfaces(
         std::vector<hardware_interface::StateInterface::ConstSharedPtr>& state_interfaces) = 0;
     virtual void exportCommandInterfaces(

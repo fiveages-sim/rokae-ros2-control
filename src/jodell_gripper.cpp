@@ -30,25 +30,32 @@ JodellGripper::JodellGripper(
     rclcpp::Logger logger,
     rclcpp::Clock::SharedPtr clock,
     const std::string& joint_name,
-    double torque_scale,
-    int velocity_command)
+    double normalized_torque,
+    double normalized_velocity)
     : logger_(std::move(logger))
     , clock_(std::move(clock))
     , joint_name_(joint_name)
     , command_torque_(static_cast<int>(
-          std::clamp(torque_scale, 0.0, 1.0) * 255.0))
-    , command_velocity_(std::clamp(velocity_command, 0, 255))
+          std::clamp(normalized_torque, 0.0, 1.0) * 255.0))
+    , command_velocity_(static_cast<int>(
+          std::clamp(normalized_velocity, 0.0, 1.0) * 255.0))
 {
-    RCLCPP_INFO(
-        logger_,
-        "Jodell command configuration: torque_scale=%.2f (raw=%d), velocity=%d",
-        std::clamp(torque_scale, 0.0, 1.0),
-        command_torque_,
-        command_velocity_);
-
     // 启动后台命令处理线程
     thread_running_ = true;
     command_thread_ = std::thread(&JodellGripper::commandThreadFunction, this);
+}
+
+void JodellGripper::setToolDynamics(double normalized_torque, double normalized_velocity) {
+    const int next_torque = static_cast<int>(std::clamp(normalized_torque, 0.0, 1.0) * 255.0);
+    const int next_velocity = static_cast<int>(std::clamp(normalized_velocity, 0.0, 1.0) * 255.0);
+    std::lock_guard<std::mutex> lock(dynamics_mutex_);
+    if (next_torque == command_torque_ && next_velocity == command_velocity_) {
+        return;
+    }
+
+    command_torque_ = next_torque;
+    command_velocity_ = next_velocity;
+    dynamics_dirty_ = true;
 }
 
 JodellGripper::~JodellGripper() {
@@ -136,7 +143,17 @@ bool JodellGripper::writeCommandPeriodic() {
     // 只在位置变化超过阈值时发送命令（避免频繁发送）
     // 阈值使用物理位置（米），约0.0004米（约1%的最大张开距离）
     const double threshold = MAX_OPENING_DISTANCE * 0.01;
-    if (std::abs(position_command_ - last_command_) > threshold) {
+    int trq_set = 0;
+    int vel_set = 0;
+    bool dynamics_dirty = false;
+    {
+        std::lock_guard<std::mutex> lock(dynamics_mutex_);
+        trq_set = command_torque_;
+        vel_set = command_velocity_;
+        dynamics_dirty = dynamics_dirty_;
+    }
+
+    if (std::abs(position_command_ - last_command_) > threshold || dynamics_dirty) {
         // 将物理位置（米）转换为归一化值（0.0-1.0）
         double normalized_command = position_command_ / MAX_OPENING_DISTANCE;
         // 限制在有效范围内
@@ -147,9 +164,6 @@ bool JodellGripper::writeCommandPeriodic() {
                    last_command_, position_command_, physical_position_, normalized_command);
         
         int pos_set = 255 - static_cast<int>(normalized_command * 255);
-        int trq_set = command_torque_;
-        int vel_set = command_velocity_;
-        
         // 将命令加入队列，由后台线程处理（非阻塞）
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -163,6 +177,10 @@ bool JodellGripper::writeCommandPeriodic() {
         
         stopped_ = false;
         last_command_ = position_command_;
+        {
+            std::lock_guard<std::mutex> lock(dynamics_mutex_);
+            dynamics_dirty_ = false;
+        }
         
         RCLCPP_INFO(logger_, "Gripper command queued: pos=%d, force=%d, vel=%d (physical: %.6f m, normalized: %.3f)",
                     pos_set, trq_set, vel_set, position_command_, normalized_command);
@@ -271,21 +289,28 @@ void JodellGripper::updateStatusFromRegisters(const std::vector<int>& robot_stat
     const int pos_now_get = (robot_stats[1] >> 8) & 0xff;
     const uint8_t new_error_code = static_cast<uint8_t>(robot_stats[1] & 0xff);
     const int new_velocity = robot_stats[2] & 0xff;
-    const int new_effort = (robot_stats[2] >> 8) & 0xff;
+    const int raw_force = (robot_stats[2] >> 8) & 0xff;
     const double new_position = 1.0 - (static_cast<double>(pos_now_get) / 255.0);
     const double new_physical_position = new_position * MAX_OPENING_DISTANCE;
     const bool new_stopped = ((new_status_byte >> 3) & 1) == 0;
+    const uint8_t object_status = (new_status_byte >> 6) & 0x03;
+    const bool object_detected = object_status == 0x01 || object_status == 0x02;
     
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
         position_ = new_position;
         physical_position_ = new_physical_position;
         velocity_ = static_cast<double>(new_velocity);
-        effort_ = static_cast<double>(new_effort);
+        // RG75 register 2 high byte is the configured/raw force byte, not a reliable
+        // continuous contact force. Expose effort as a contact flag decoded from
+        // the gripper object-status bits so adaptive force feedback only triggers
+        // on actual object detection.
+        effort_ = object_detected ? 1.0 : 0.0;
         stopped_ = new_stopped;
         status_byte_ = new_status_byte;
         error_code_ = new_error_code;
     }
+    (void)raw_force;
 }
 
 void JodellGripper::readStatusInternal(rokae::xMateErProRobot& robot) {

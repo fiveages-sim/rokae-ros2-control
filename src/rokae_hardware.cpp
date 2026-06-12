@@ -9,10 +9,21 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
+#include <pthread.h>
+#include <sched.h>
 #include <stdexcept>
 
 namespace rokae_ros2_control {
     namespace {
+        constexpr double kRealtimeControlDt = 0.001;
+        constexpr double kEpsilon = 1.0e-9;
+        constexpr bool kSdkFilterLimitEnable = true;
+        constexpr int kSdkFilterLimit = 10;
+        constexpr int kSdkFilterJointFrequency = 10;
+        constexpr int kSdkFilterCartesianFrequency = 10;
+        constexpr int kSdkFilterTorqueFrequency = 10;
+
         std::string normalizeControlMode(const std::string &mode) {
             std::string normalized = mode;
             std::transform(normalized.begin(), normalized.end(), normalized.begin(),
@@ -66,11 +77,139 @@ namespace rokae_ros2_control {
             return "";
         }
 
-        bool isAg2f90Type(const std::string &gripper_type) {
+        bool isAg2f90CType(const std::string &gripper_type) {
+            return gripper_type == "ag2f90_c" || gripper_type == "ag2f90c" ||
+                   gripper_type == "ag2f90" || gripper_type == "changingtek90c";
+        }
+
+        bool isAg2f90DType(const std::string &gripper_type) {
             return gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
-                   gripper_type == "ag2f90" || gripper_type == "changingtek90d";
+                   gripper_type == "changingtek90d";
+        }
+
+        bool isAg2f90Type(const std::string &gripper_type) {
+            return isAg2f90CType(gripper_type) || isAg2f90DType(gripper_type);
+        }
+
+        bool gripperJointIsRight(const std::string &joint_name) {
+            std::string lower = joint_name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return lower.find("right") != std::string::npos;
+        }
+
+        double clampToolParam(double value) {
+            return std::clamp(value, 0.0, 1.0);
         }
     } // namespace
+
+    int RokaeHardware::DoubleSFilter::sign(double value) {
+        if (value > kEpsilon) {
+            return 1;
+        }
+        if (value < -kEpsilon) {
+            return -1;
+        }
+        return 0;
+    }
+
+    void RokaeHardware::DoubleSFilter::reset(
+        double position, double velocity, double acceleration) {
+        q = position;
+        qd = velocity;
+        qdd = acceleration;
+    }
+
+    double RokaeHardware::DoubleSFilter::updateTo(
+        double target_position, double target_velocity, double target_acceleration) {
+        const double jerk = getJerk(target_position, target_velocity, target_acceleration);
+        const double next_acceleration = qdd + dt * jerk;
+        const double next_velocity = qd + dt * 0.5 * (next_acceleration + qdd);
+        q += dt * 0.5 * (next_velocity + qd);
+        qd = next_velocity;
+        qdd = next_acceleration;
+        return q;
+    }
+
+    double RokaeHardware::DoubleSFilter::getJerk(
+        double target_position, double target_velocity, double target_acceleration) const {
+        const double jerk = std::max(std::abs(jerk_limit), kEpsilon);
+        const double ek = (q - target_position) / jerk;
+        const double ek_1 = (qd - target_velocity) / jerk;
+        const double ek_2 = (qdd - target_acceleration) / jerk;
+        const double e_min_1 = (v_min - target_velocity) / jerk;
+        const double e_max_1 = (v_max - target_velocity) / jerk;
+        const double e_min_2 = (a_min - target_acceleration) / jerk;
+        const double e_max_2 = (a_max - target_acceleration) / jerk;
+
+        const double delta = ek_1 + (ek_2 * std::abs(ek_2)) / 2.0;
+        const int s_delta = sign(delta);
+        const double sqrt_arg = std::max(
+            0.0,
+            2.0 * std::pow((ek_2 * ek_2) + 2.0 * ek_1 * static_cast<double>(s_delta), 3.0));
+        const double sigma =
+            ek + ek_1 * ek_2 * static_cast<double>(s_delta) -
+            (std::pow(ek_2, 3.0) * (1.0 - 3.0 * std::abs(s_delta))) / 6.0 +
+            static_cast<double>(s_delta) * std::sqrt(sqrt_arg) / 4.0;
+
+        const double max_accel_error = std::abs(e_max_2) > kEpsilon ? e_max_2 : kEpsilon;
+        const double min_accel_error = std::abs(e_min_2) > kEpsilon ? e_min_2 : -kEpsilon;
+        const double positive_brake = (ek_2 * ek_2) - 2.0 * ek_1;
+        const double negative_brake = (ek_2 * ek_2) + 2.0 * ek_1;
+        const double nu_p =
+            ek - max_accel_error * positive_brake / 4.0 -
+            (positive_brake * positive_brake) / (8.0 * max_accel_error) -
+            ek_2 * (3.0 * ek_1 - (ek_2 * ek_2)) / 3.0;
+        const double nu_n =
+            ek - min_accel_error * negative_brake / 4.0 -
+            (negative_brake * negative_brake) / (8.0 * min_accel_error) +
+            ek_2 * (3.0 * ek_1 + (ek_2 * ek_2)) / 3.0;
+
+        double sigma_limited = sigma;
+        if (ek_2 <= e_max_2 && ek_1 <= (ek_2 * ek_2) / 2.0 - (e_max_2 * e_max_2)) {
+            sigma_limited = nu_p;
+        } else if (ek_2 >= e_min_2 && ek_1 >= (e_min_2 * e_min_2) - (ek_2 * ek_2) / 2.0) {
+            sigma_limited = nu_n;
+        }
+
+        const int sigma_sign = sign(sigma_limited);
+        const double control =
+            -jerk * sign(
+                sigma_limited +
+                (1.0 - std::abs(sigma_sign)) *
+                    (delta + (1.0 - std::abs(s_delta)) * ek_2));
+
+        return std::max(
+            velocityControl(e_min_2, e_max_2, ek_2, ek_1, e_min_1),
+            std::min(control, velocityControl(e_min_2, e_max_2, ek_2, ek_1, e_max_1)));
+    }
+
+    double RokaeHardware::DoubleSFilter::accelControl(
+        double error_acceleration, double acceleration_limit) const {
+        return -std::abs(jerk_limit) * sign(error_acceleration - acceleration_limit);
+    }
+
+    double RokaeHardware::DoubleSFilter::velocityBoundary(
+        double error_acceleration, double error_velocity, double velocity_limit) const {
+        const double delta_v =
+            error_acceleration * std::abs(error_acceleration) +
+            2.0 * (error_velocity - velocity_limit);
+        return -std::abs(jerk_limit) *
+               sign(delta_v + (1.0 - std::abs(sign(delta_v))) * error_acceleration);
+    }
+
+    double RokaeHardware::DoubleSFilter::velocityControl(
+        double min_error_acceleration,
+        double max_error_acceleration,
+        double error_acceleration,
+        double error_velocity,
+        double velocity_limit) const {
+        return std::max(
+            accelControl(error_acceleration, min_error_acceleration),
+            std::min(
+                velocityBoundary(error_acceleration, error_velocity, velocity_limit),
+                accelControl(error_acceleration, max_error_acceleration)));
+    }
 
     RokaeHardware::~RokaeHardware() {
         shutdownRobot();
@@ -93,11 +232,13 @@ namespace rokae_ros2_control {
         joint_velocities_.resize(joint_count, 0.0);
         joint_efforts_.resize(joint_count, 0.0);
         joint_position_commands_.resize(joint_count, 0.0);
+        target_joint_position_commands_.resize(joint_count, 0.0);
 
         // 初始化插值相关变量
         prev_joint_position_commands_.resize(joint_count, 0.0);
         next_joint_position_commands_.resize(joint_count, 0.0);
         last_sent_joint_positions_.resize(joint_count, 0.0);
+        alpha_increment_ = 1.0;
         interpolation_alpha_ = 0.0; // 初始插值系数为0
 
         // 读取配置参数的辅助函数（直接从 params 读取）
@@ -121,6 +262,21 @@ namespace rokae_ros2_control {
         // 读取配置参数
         arm_ip_ = get_hardware_parameter("arm_ip", std::string("192.168.1.160"));
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.1.233"));
+        const int cpu_affinity = get_hardware_parameter("cpu_affinity", -1);
+        rt_cpu_affinity_ = get_hardware_parameter("rt_cpu_affinity", cpu_affinity);
+        state_cpu_affinity_ = get_hardware_parameter("state_cpu_affinity", cpu_affinity);
+        std::string command_filter_mode =
+            get_hardware_parameter("command_filter_mode", std::string("double_s"));
+        std::transform(command_filter_mode.begin(), command_filter_mode.end(), command_filter_mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        use_double_s_filter_ =
+            !(command_filter_mode == "none" || command_filter_mode == "off" || command_filter_mode == "linear");
+        command_filter_max_velocity_ =
+            std::abs(get_hardware_parameter("command_filter_max_velocity", command_filter_max_velocity_));
+        command_filter_max_acceleration_ =
+            std::abs(get_hardware_parameter("command_filter_max_acceleration", command_filter_max_acceleration_));
+        command_filter_max_jerk_ =
+            std::abs(get_hardware_parameter("command_filter_max_jerk", command_filter_max_jerk_));
 
         const std::string gripper_joint_name = detectGripperJoint(params.hardware_info.joints);
         if (!gripper_joint_name.empty()) {
@@ -133,17 +289,19 @@ namespace rokae_ros2_control {
                         gripper_joint_name.c_str(),
                         gripper_type.c_str());
 
+            const bool is_right_gripper = gripperJointIsRight(gripper_joint_name);
+            const double tool_torque = clampToolParam(get_hardware_parameter(
+                is_right_gripper ? "right_tool_torque" : "left_tool_torque", 1.0));
+            const double tool_velocity = clampToolParam(get_hardware_parameter(
+                is_right_gripper ? "right_tool_velocity" : "left_tool_velocity", 1.0));
+
             if (gripper_type == "jodell" || gripper_type == "rg75" || gripper_type == "dual_rg75") {
-                const double torque_scale =
-                    get_hardware_parameter("gripper_torque_scale", 1.0);
-                const int velocity_command =
-                    get_hardware_parameter("gripper_velocity", 100);
                 gripper_ = std::make_unique<JodellGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
                     gripper_joint_name,
-                    torque_scale,
-                    velocity_command);
+                    tool_torque,
+                    tool_velocity);
             } else if (isAg2f90Type(gripper_type)) {
                 Ag2f90dGripper::Config config;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
@@ -154,6 +312,25 @@ namespace rokae_ros2_control {
                     get_hardware_parameter("gripper_configure_xpanel", false);
                 config.read_interval_ms =
                     get_hardware_parameter("gripper_read_interval_ms", 500);
+                config.normalized_torque = tool_torque;
+                config.normalized_velocity = tool_velocity;
+                config.velocity_reg = get_hardware_parameter("gripper_velocity_reg", config.velocity_reg);
+                config.torque_reg = get_hardware_parameter("gripper_torque_reg", config.torque_reg);
+                config.acceleration_reg = get_hardware_parameter("gripper_acceleration_reg", config.acceleration_reg);
+                config.deceleration_reg = get_hardware_parameter("gripper_deceleration_reg", config.deceleration_reg);
+                config.default_acceleration =
+                    get_hardware_parameter("gripper_default_acceleration", config.default_acceleration);
+                config.default_deceleration =
+                    get_hardware_parameter("gripper_default_deceleration", config.default_deceleration);
+                if (isAg2f90CType(gripper_type)) {
+                    config.model_name = "AG2F90C";
+                    config.feedback_reg = Ag2f90dGripper::FEEDBACK_REG_C;
+                } else {
+                    config.model_name = "AG2F90D";
+                    config.feedback_reg = Ag2f90dGripper::FEEDBACK_REG_D;
+                }
+                config.feedback_reg =
+                    get_hardware_parameter("gripper_feedback_reg", config.feedback_reg);
                 gripper_ = std::make_unique<Ag2f90dGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
@@ -181,6 +358,15 @@ namespace rokae_ros2_control {
             arm_joint_count = joint_count - 1;
         }
         arm_joint_count_ = static_cast<size_t>(arm_joint_count);
+        command_filters_.assign(arm_joint_count_, DoubleSFilter{});
+        for (auto &filter : command_filters_) {
+            filter.v_min = -command_filter_max_velocity_;
+            filter.v_max = command_filter_max_velocity_;
+            filter.a_min = -command_filter_max_acceleration_;
+            filter.a_max = command_filter_max_acceleration_;
+            filter.jerk_limit = command_filter_max_jerk_;
+            filter.dt = kRealtimeControlDt;
+        }
 
         // 初始化控制模式标志。启动模式只由 ctrl_mode 参数决定，默认 POSITION。
         use_impedance_control_ = false;
@@ -195,6 +381,14 @@ namespace rokae_ros2_control {
         RCLCPP_INFO(get_node()->get_logger(), "  Local IP: %s", local_ip_.c_str());
         RCLCPP_INFO(get_node()->get_logger(), "  Number of joints: %d", joint_count);
         RCLCPP_INFO(get_node()->get_logger(), "  Control mode: %s", ctrl_mode_.c_str());
+        RCLCPP_INFO(get_node()->get_logger(), "  CPU affinity: rt=%d, state=%d",
+                    rt_cpu_affinity_, state_cpu_affinity_);
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "  Command filter: %s (v=%.3f rad/s, a=%.3f rad/s^2, j=%.3f rad/s^3)",
+                    use_double_s_filter_ ? "double_s" : "off",
+                    command_filter_max_velocity_,
+                    command_filter_max_acceleration_,
+                    command_filter_max_jerk_);
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
 
         // 初始化xCoreSDK
@@ -343,6 +537,42 @@ namespace rokae_ros2_control {
             applyControlMode("POSITION");
         }
 
+        const auto read_hw_double = [&params](const std::string &name, double fallback) {
+            const auto it = params.hardware_info.hardware_parameters.find(name);
+            if (it == params.hardware_info.hardware_parameters.end()) {
+                return fallback;
+            }
+            try {
+                return std::stod(it->second);
+            } catch (...) {
+                return fallback;
+            }
+        };
+        const double left_tool_torque =
+            clampToolParam(read_hw_double("left_tool_torque", 1.0));
+        const double left_tool_velocity =
+            clampToolParam(read_hw_double("left_tool_velocity", 1.0));
+        const double right_tool_torque =
+            clampToolParam(read_hw_double("right_tool_torque", 1.0));
+        const double right_tool_velocity =
+            clampToolParam(read_hw_double("right_tool_velocity", 1.0));
+
+        rcl_interfaces::msg::ParameterDescriptor tool_param_descriptor;
+        tool_param_descriptor.dynamic_typing = true;
+        tool_param_descriptor.description = "Normalized tool torque/velocity in [0.0, 1.0]";
+        if (!get_node()->has_parameter("left_tool_torque")) {
+            get_node()->declare_parameter<double>("left_tool_torque", left_tool_torque, tool_param_descriptor);
+        }
+        if (!get_node()->has_parameter("left_tool_velocity")) {
+            get_node()->declare_parameter<double>("left_tool_velocity", left_tool_velocity, tool_param_descriptor);
+        }
+        if (!get_node()->has_parameter("right_tool_torque")) {
+            get_node()->declare_parameter<double>("right_tool_torque", right_tool_torque, tool_param_descriptor);
+        }
+        if (!get_node()->has_parameter("right_tool_velocity")) {
+            get_node()->declare_parameter<double>("right_tool_velocity", right_tool_velocity, tool_param_descriptor);
+        }
+
         RCLCPP_INFO(get_node()->get_logger(),
                     "Dynamic control parameters ready: ctrl_mode=%s, joint_impedance size=%zu",
                     ctrl_mode_.c_str(), joint_impedance_param.size());
@@ -355,8 +585,26 @@ namespace rokae_ros2_control {
 
         bool ctrl_mode_changed = false;
         bool joint_impedance_changed = false;
+        bool tool_dynamics_changed = false;
         std::string next_ctrl_mode = ctrl_mode_;
         std::vector<double> next_joint_impedance;
+        const auto read_tool_param = [this](const std::string &name, double fallback) {
+            if (!get_node()->has_parameter(name)) {
+                return fallback;
+            }
+            const auto param = get_node()->get_parameter(name);
+            if (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+                return static_cast<double>(param.as_int());
+            }
+            if (param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+                return param.as_double();
+            }
+            return fallback;
+        };
+        double next_left_tool_torque = read_tool_param("left_tool_torque", 1.0);
+        double next_left_tool_velocity = read_tool_param("left_tool_velocity", 1.0);
+        double next_right_tool_torque = read_tool_param("right_tool_torque", 1.0);
+        double next_right_tool_velocity = read_tool_param("right_tool_velocity", 1.0);
 
         for (const auto &param : params) {
             if (param.get_name() == "ctrl_mode") {
@@ -396,6 +644,37 @@ namespace rokae_ros2_control {
                 }
 
                 joint_impedance_changed = true;
+            } else if (param.get_name() == "left_tool_torque" ||
+                       param.get_name() == "left_tool_velocity" ||
+                       param.get_name() == "right_tool_torque" ||
+                       param.get_name() == "right_tool_velocity") {
+                if (param.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE &&
+                    param.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER) {
+                    result.successful = false;
+                    result.reason = param.get_name() + " must be a number";
+                    return result;
+                }
+
+                const double value =
+                    (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+                        ? static_cast<double>(param.as_int())
+                        : param.as_double();
+                if (value < 0.0 || value > 1.0) {
+                    result.successful = false;
+                    result.reason = param.get_name() + " must be in [0.0, 1.0]";
+                    return result;
+                }
+
+                if (param.get_name() == "left_tool_torque") {
+                    next_left_tool_torque = value;
+                } else if (param.get_name() == "left_tool_velocity") {
+                    next_left_tool_velocity = value;
+                } else if (param.get_name() == "right_tool_torque") {
+                    next_right_tool_torque = value;
+                } else {
+                    next_right_tool_velocity = value;
+                }
+                tool_dynamics_changed = true;
             }
         }
 
@@ -439,6 +718,14 @@ namespace rokae_ros2_control {
             result.successful = false;
             result.reason = "failed to apply ctrl_mode";
             return result;
+        }
+
+        if (tool_dynamics_changed && gripper_) {
+            const bool is_right_gripper = gripperJointIsRight(gripper_->getJointName());
+            const double torque = is_right_gripper ? next_right_tool_torque : next_left_tool_torque;
+            const double velocity = is_right_gripper ? next_right_tool_velocity : next_left_tool_velocity;
+            gripper_->setToolDynamics(torque, velocity);
+            gripper_->writeCommandPeriodic();
         }
 
         if (control_mode_lock.owns_lock()) {
@@ -510,15 +797,28 @@ namespace rokae_ros2_control {
         for (size_t i = 0; i < arm_joint_count_ && i < joint_position_commands_.size(); ++i) {
             joint_positions_[i] = current_positions[i];
             joint_position_commands_[i] = current_positions[i];
+            target_joint_position_commands_[i] = current_positions[i];
             prev_joint_position_commands_[i] = current_positions[i];
             next_joint_position_commands_[i] = current_positions[i];
             last_sent_joint_positions_[i] = current_positions[i];
         }
         interpolation_alpha_ = 0.0;
+        resetCommandFilters(last_sent_joint_positions_);
 
         RCLCPP_INFO(get_node()->get_logger(),
                     "Synced position commands to current state while %s", reason.c_str());
         return true;
+    }
+
+    void RokaeHardware::resetCommandFilters(const std::vector<double> &positions) {
+        const size_t count = std::min(command_filters_.size(), positions.size());
+        for (size_t i = 0; i < count; ++i) {
+            double velocity = 0.0;
+            if (i < joint_velocities_.size()) {
+                velocity = joint_velocities_[i];
+            }
+            command_filters_[i].reset(positions[i], velocity, 0.0);
+        }
     }
 
     hardware_interface::CallbackReturn
@@ -557,6 +857,7 @@ namespace rokae_ros2_control {
                 for (size_t i = 0; i < arm_joint_count_ && i < current_pos.size(); ++i) {
                     joint_positions_[i] = current_pos[i];
                     joint_position_commands_[i] = current_pos[i];
+                    target_joint_position_commands_[i] = current_pos[i];
                     // 初始化插值命令为当前位置
                     prev_joint_position_commands_[i] = current_pos[i];
                     next_joint_position_commands_[i] = current_pos[i];
@@ -564,6 +865,7 @@ namespace rokae_ros2_control {
                 }
                 // 插值相关变量会在第一次write调用时初始化
                 interpolation_alpha_ = 0.0;
+                resetCommandFilters(last_sent_joint_positions_);
 
                 // 打印初始位置（动态格式化）
                 std::stringstream ss;
@@ -696,7 +998,7 @@ namespace rokae_ros2_control {
 
     hardware_interface::return_type RokaeHardware::write(
         const rclcpp::Time & /*time*/,
-        const rclcpp::Duration &period) {
+        const rclcpp::Duration & /*period*/) {
         // 启动实时控制线程（类似Dobot的延迟启动策略）
         if (arm_robot_ && !rt_control_running_) {
             startRealtimeControl();
@@ -704,17 +1006,13 @@ namespace rokae_ros2_control {
 
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
-            // 更新命令（自适应频率）
-            // 从当前实际位置（last_sent_joint_positions_）开始新的插值，平滑过渡到新目标。
-            prev_joint_position_commands_ = last_sent_joint_positions_;
-            next_joint_position_commands_ = joint_position_commands_;
+            if (target_joint_position_commands_.size() != joint_position_commands_.size()) {
+                target_joint_position_commands_.resize(joint_position_commands_.size(), 0.0);
+            }
 
-            // 更新硬件更新周期并预计算alpha增量（从period参数获取）
-            double hw_period = period.seconds();
-            alpha_increment_ = 0.001 / hw_period; // 1kHz回调周期 / 硬件更新周期
-
-            // 重置插值系数为0（开始新的插值周期：从当前位置到新目标）
-            interpolation_alpha_ = 0.0;
+            for (size_t i = 0; i < joint_position_commands_.size(); ++i) {
+                target_joint_position_commands_[i] = joint_position_commands_[i];
+            }
         }
 
         // 夹爪控制：检测命令变化并发送
@@ -756,8 +1054,19 @@ namespace rokae_ros2_control {
 
             applyLoad();
 
-            rt_controller_->setFilterLimit(true, 10);
-            rt_controller_->setFilterFrequency(10, 10, 10, ec);
+            rt_controller_->setFilterLimit(kSdkFilterLimitEnable, kSdkFilterLimit);
+            if (kSdkFilterLimitEnable) {
+                rt_controller_->setFilterFrequency(
+                    kSdkFilterJointFrequency,
+                    kSdkFilterCartesianFrequency,
+                    kSdkFilterTorqueFrequency,
+                    ec);
+                if (ec) {
+                    RCLCPP_WARN(get_node()->get_logger(),
+                                "Failed to set SDK filter frequency: %s",
+                                ec.message().c_str());
+                }
+            }
 
             // 初始化实时控制状态
             rt_control_running_ = false;
@@ -819,8 +1128,9 @@ namespace rokae_ros2_control {
             // 启动实时控制线程
             rt_control_running_ = true;
             rt_move_restart_requested_ = false;
-            rt_controller_->setLoopRecvDataTimeout(10);
+            rt_controller_->setLoopRecvDataTimeout(8);
             rt_control_thread_ = std::thread(&RokaeHardware::controlLoop, this);
+            bindThreadToCpu(rt_control_thread_, rt_cpu_affinity_, "realtime control");
 
             RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
         } catch (const std::exception &e) {
@@ -916,23 +1226,24 @@ namespace rokae_ros2_control {
                 std::vector<double> command_positions;
                 {
                     std::lock_guard<std::mutex> lock(data_mutex_);
-                    // 计算插值命令
-                    // 累积插值系数（使用预计算的增量）
-                    interpolation_alpha_ += alpha_increment_;
-
-                    // 限制alpha在0.0到1.0之间
-                    if (interpolation_alpha_ > 1.0) {
-                        interpolation_alpha_ = 1.0;
+                    if (target_joint_position_commands_.size() < arm_joint_count_) {
+                        target_joint_position_commands_.resize(arm_joint_count_, 0.0);
                     }
 
-                    // 线性插值生成1kHz命令，直接写入last_sent_joint_positions_
-                    for (size_t i = 0; i < arm_joint_count_ &&
-                                       i < prev_joint_position_commands_.size() &&
-                                       i < next_joint_position_commands_.size(); ++i) {
-                        last_sent_joint_positions_[i] = prev_joint_position_commands_[i] +
-                                                        (next_joint_position_commands_[i] - prev_joint_position_commands_[
-                                                             i]) * interpolation_alpha_;
+                    if (use_double_s_filter_) {
+                        for (size_t i = 0; i < arm_joint_count_ &&
+                                           i < command_filters_.size() &&
+                                           i < target_joint_position_commands_.size(); ++i) {
+                            last_sent_joint_positions_[i] =
+                                command_filters_[i].updateTo(target_joint_position_commands_[i]);
+                        }
+                    } else {
+                        for (size_t i = 0; i < arm_joint_count_ &&
+                                           i < target_joint_position_commands_.size(); ++i) {
+                            last_sent_joint_positions_[i] = target_joint_position_commands_[i];
+                        }
                     }
+
                     command_positions.assign(
                         last_sent_joint_positions_.begin(),
                         last_sent_joint_positions_.begin() + static_cast<std::ptrdiff_t>(arm_joint_count_));
@@ -1033,6 +1344,7 @@ namespace rokae_ros2_control {
         try {
             state_update_running_ = true;
             state_update_thread_ = std::thread(&RokaeHardware::stateUpdateLoop, this);
+            bindThreadToCpu(state_update_thread_, state_cpu_affinity_, "state update");
             RCLCPP_INFO(get_node()->get_logger(), "State update thread started");
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Failed to start state update thread: %s", e.what());
@@ -1072,6 +1384,28 @@ namespace rokae_ros2_control {
             // 避免过度占用CPU
             std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 20Hz
         }
+    }
+
+    void RokaeHardware::bindThreadToCpu(std::thread &thread, int cpu_id, const std::string &thread_name) {
+        if (cpu_id < 0) {
+            return;
+        }
+
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(static_cast<unsigned int>(cpu_id), &cpuset);
+
+        const int rc = pthread_setaffinity_np(thread.native_handle(), sizeof(cpu_set_t), &cpuset);
+        if (rc != 0) {
+            RCLCPP_WARN(get_node()->get_logger(),
+                        "Failed to bind %s thread for arm %s to CPU %d: %s",
+                        thread_name.c_str(), arm_ip_.c_str(), cpu_id, std::strerror(rc));
+            return;
+        }
+
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "Bound %s thread for arm %s to CPU %d",
+                    thread_name.c_str(), arm_ip_.c_str(), cpu_id);
     }
 } // namespace rokae_ros2_control
 
