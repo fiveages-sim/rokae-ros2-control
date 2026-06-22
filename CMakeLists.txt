@@ -23,6 +23,7 @@ add_library(${PROJECT_NAME} SHARED
         src/rokae_hardware.cpp
         src/jodell_gripper.cpp
         src/ag2f90d_gripper.cpp
+        src/linkerhand_l6.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC

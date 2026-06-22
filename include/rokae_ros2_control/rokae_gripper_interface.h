@@ -20,6 +20,7 @@ public:
 
     virtual bool hasGripper() const = 0;
     virtual const std::string& getJointName() const = 0;
+    virtual size_t getJointCount() const { return 1; }
     virtual bool isInitialized() const = 0;
 
     virtual double* getPositionPtr() = 0;

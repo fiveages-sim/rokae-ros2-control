@@ -64,6 +64,14 @@ and state are normalized: `0.0` is closed, and `1.0` is fully open. If a
 configured gripper is not connected, the exported state stays at `0.0` instead
 of an invalid sentinel value.
 
+### LinkerHand L6
+
+`gripper_type=linkerhand_l6`（或 `l6`）通过 Rokae 末端 RS485 控制 L6。
+Modbus RTU 左右手地址分别为 `0x28`、`0x27`；`FC04` 读取 0-5
+位置寄存器，`FC16` 写入 0-17 位置、力矩和速度寄存器。为满足 Rokae SDK
+单次最多 3 个 `int16` 寄存器的限制，请求按连续 3 寄存器分帧。可选参数为
+`hand_slave_id`、`hand_configure_xpanel` 和 `hand_read_interval_ms`。
+
 ## 4. Load Configuration
 
 The plugin applies an xCoreSDK `setLoad()` setting when it initializes the

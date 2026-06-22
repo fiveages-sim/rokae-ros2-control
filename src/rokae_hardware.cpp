@@ -1,6 +1,7 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
 #include "rokae_ros2_control/jodell_gripper.h"
+#include "rokae_ros2_control/linkerhand_l6.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <sstream>
 #include <iomanip>
@@ -75,6 +76,22 @@ namespace rokae_ros2_control {
             }
 
             return "";
+        }
+
+        std::vector<std::string> detectL6Joints(
+            const std::vector<hardware_interface::ComponentInfo>& joints) {
+            static const std::array<const char*, 6> suffixes = {
+                "thumb_joint1", "thumb_joint2", "index_joint",
+                "middle_joint", "ring_joint", "pinky_joint"};
+            std::vector<std::string> result;
+            result.reserve(suffixes.size());
+            for (const char* suffix : suffixes) {
+                const auto it = std::find_if(joints.begin(), joints.end(), [suffix](const auto& joint) {
+                    return joint.name.find(suffix) != std::string::npos;
+                });
+                if (it != joints.end()) result.push_back(it->name);
+            }
+            return result;
         }
 
         bool isAg2f90CType(const std::string &gripper_type) {
@@ -302,6 +319,17 @@ namespace rokae_ros2_control {
                     gripper_joint_name,
                     tool_torque,
                     tool_velocity);
+            } else if (gripper_type == "linkerhand_l6" || gripper_type == "l6") {
+                const auto hand_joints = detectL6Joints(params.hardware_info.joints);
+                LinkerHandL6::Config config;
+                config.slave_id = get_hardware_parameter(
+                    "hand_slave_id", is_right_gripper ? 0x27 : 0x28);
+                config.configure_xpanel = get_hardware_parameter("hand_configure_xpanel", false);
+                config.read_interval_ms = get_hardware_parameter("hand_read_interval_ms", 100);
+                config.normalized_torque = tool_torque;
+                config.normalized_velocity = tool_velocity;
+                gripper_ = std::make_unique<LinkerHandL6>(
+                    get_node()->get_logger(), get_node()->get_clock(), hand_joints, config);
             } else if (isAg2f90Type(gripper_type)) {
                 Ag2f90dGripper::Config config;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
@@ -355,7 +383,7 @@ namespace rokae_ros2_control {
         // 计算机械臂关节数量（排除夹爪）
         int arm_joint_count = joint_count;
         if (gripper_) {
-            arm_joint_count = joint_count - 1;
+            arm_joint_count = joint_count - static_cast<int>(gripper_->getJointCount());
         }
         arm_joint_count_ = static_cast<size_t>(arm_joint_count);
         command_filters_.assign(arm_joint_count_, DoubleSFilter{});
@@ -906,7 +934,7 @@ namespace rokae_ros2_control {
         // 为所有关节导出状态接口：位置、速度、力矩
         size_t joint_name_sz = joint_names_.size();
         if (gripper_) {
-            joint_name_sz = joint_names_.size() - 1;
+            joint_name_sz = joint_names_.size() - gripper_->getJointCount();
         }
 
         for (size_t i = 0; i < joint_name_sz; ++i) {
@@ -931,8 +959,8 @@ namespace rokae_ros2_control {
         // 输出日志
         if (gripper_) {
             RCLCPP_INFO(get_node()->get_logger(),
-                        "Exported %zu state interfaces (%zu arm joints + 1 gripper)",
-                        state_interfaces.size(), joint_name_sz);
+                        "Exported %zu state interfaces (%zu arm joints + %zu tool joints)",
+                        state_interfaces.size(), joint_name_sz, gripper_->getJointCount());
         } else {
             RCLCPP_INFO(get_node()->get_logger(),
                         "Exported %zu state interfaces for %zu joints",
@@ -948,7 +976,7 @@ namespace rokae_ros2_control {
         // 为所有关节导出命令接口：位置命令
         size_t joint_name_sz = joint_names_.size();
         if (gripper_) {
-            joint_name_sz = joint_names_.size() - 1;
+            joint_name_sz = joint_names_.size() - gripper_->getJointCount();
         }
 
         for (size_t i = 0; i < joint_name_sz; ++i) {
@@ -965,8 +993,8 @@ namespace rokae_ros2_control {
         // 输出日志
         if (gripper_) {
             RCLCPP_INFO(get_node()->get_logger(),
-                        "Exported %zu command interfaces (%zu arm joints + 1 gripper)",
-                        command_interfaces.size(), joint_name_sz);
+                        "Exported %zu command interfaces (%zu arm joints + %zu tool joints)",
+                        command_interfaces.size(), joint_name_sz, gripper_->getJointCount());
         } else {
             RCLCPP_INFO(get_node()->get_logger(),
                         "Exported %zu command interfaces for %zu joints",
