@@ -62,6 +62,7 @@ private:
     bool writeCommand(const std::array<double, JOINT_COUNT>& command);
     void communicationLoop();
     static double jointUpperLimit(const std::string& joint_name);
+    static double maxFeedbackJump(double upper_limit);
     static int positionToRegister(double position, double upper_limit);
     static double registerToPosition(int value, double upper_limit);
 
@@ -75,6 +76,7 @@ private:
     std::array<double, JOINT_COUNT> commands_{};
     std::array<double, JOINT_COUNT> pending_commands_{};
     std::array<double, JOINT_COUNT> last_commands_{};
+    bool have_valid_positions_ = false;
     double torque_ = 1.0;
     double velocity_ = 1.0;
     bool dynamics_dirty_ = true;

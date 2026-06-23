@@ -79,6 +79,23 @@ bool LinkerHandL6::writeCommandPeriodic() {
     std::lock_guard<std::mutex> lock(mutex_);
     bool changed = dynamics_dirty_;
     for (size_t i = 0; i < JOINT_COUNT; ++i) {
+        if (!std::isfinite(commands_[i])) {
+            RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000,
+                                 "Ignoring invalid LinkerHand L6 command for %s: %.6f",
+                                 joint_names_[i].c_str(), commands_[i]);
+            commands_[i] = last_commands_[i];
+            continue;
+        }
+
+        const double upper_limit = jointUpperLimit(joint_names_[i]);
+        const double clamped = std::clamp(commands_[i], 0.0, upper_limit);
+        if (std::abs(clamped - commands_[i]) > 1e-6) {
+            RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000,
+                                 "Clamped LinkerHand L6 command for %s from %.6f to %.6f",
+                                 joint_names_[i].c_str(), commands_[i], clamped);
+            commands_[i] = clamped;
+        }
+
         changed = changed || std::isnan(last_commands_[i]) ||
                   std::abs(commands_[i] - last_commands_[i]) > 0.001;
     }
@@ -107,10 +124,34 @@ bool LinkerHandL6::readPositions() {
         std::copy(chunk.begin(), chunk.end(), values.begin() + offset);
     }
 
+    std::array<double, JOINT_COUNT> new_positions{};
+    for (size_t i = 0; i < JOINT_COUNT; ++i) {
+        new_positions[i] = registerToPosition(values[i], jointUpperLimit(joint_names_[i]));
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     for (size_t i = 0; i < JOINT_COUNT; ++i) {
-        positions_[i] = registerToPosition(values[i], jointUpperLimit(joint_names_[i]));
+        const double upper_limit = jointUpperLimit(joint_names_[i]);
+        const double jump_limit = maxFeedbackJump(upper_limit);
+        const bool have_position = have_valid_positions_ && std::isfinite(positions_[i]);
+        const bool near_command = std::isfinite(last_commands_[i]) &&
+                                  std::abs(new_positions[i] - last_commands_[i]) <= jump_limit;
+        const bool sudden_jump = have_position &&
+                                 std::abs(new_positions[i] - positions_[i]) > jump_limit &&
+                                 !near_command;
+
+        if (sudden_jump) {
+            RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000,
+                                 "Rejected LinkerHand L6 feedback jump for %s: %.6f -> %.6f "
+                                 "(last command %.6f, raw=%d)",
+                                 joint_names_[i].c_str(), positions_[i], new_positions[i],
+                                 last_commands_[i], values[i]);
+            continue;
+        }
+
+        positions_[i] = new_positions[i];
     }
+    have_valid_positions_ = true;
     return true;
 }
 
@@ -126,6 +167,12 @@ bool LinkerHandL6::writeCommand(const std::array<double, JOINT_COUNT>& command) 
     const int raw_torque = static_cast<int>(std::lround(torque * 255.0));
     const int raw_velocity = static_cast<int>(std::lround(velocity * 255.0));
     for (size_t i = 0; i < JOINT_COUNT; ++i) {
+        if (!std::isfinite(command[i])) {
+            RCLCPP_WARN_THROTTLE(logger_, *clock_, 2000,
+                                 "Refusing to write invalid LinkerHand L6 command for %s: %.6f",
+                                 joint_names_[i].c_str(), command[i]);
+            return false;
+        }
         position_values[i] = positionToRegister(command[i], jointUpperLimit(joint_names_[i]));
     }
 
@@ -184,6 +231,10 @@ double LinkerHandL6::jointUpperLimit(const std::string& joint_name) {
     if (joint_name.find("thumb_joint1") != std::string::npos) return 0.99;
     if (joint_name.find("thumb_joint2") != std::string::npos) return 1.39;
     return 1.26;
+}
+
+double LinkerHandL6::maxFeedbackJump(double upper_limit) {
+    return std::max(0.20, upper_limit * 0.35);
 }
 
 int LinkerHandL6::positionToRegister(double position, double upper_limit) {
