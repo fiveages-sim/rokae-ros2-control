@@ -1,5 +1,6 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
+#include "rokae_ros2_control/ag2f120s_gripper.h"
 #include "rokae_ros2_control/jodell_gripper.h"
 #include "rokae_ros2_control/linkerhand_l6.h"
 #include <pluginlib/class_list_macros.hpp>
@@ -106,6 +107,14 @@ namespace rokae_ros2_control {
 
         bool isAg2f90Type(const std::string &gripper_type) {
             return isAg2f90CType(gripper_type) || isAg2f90DType(gripper_type);
+        }
+
+        bool isAg2f120SType(const std::string &gripper_type) {
+            return gripper_type == "ag2f120s" || gripper_type == "changingtek120s";
+        }
+
+        bool isAg2f120SDType(const std::string &gripper_type) {
+            return gripper_type == "ag2f120s_d" || gripper_type == "changingtek120s_d";
         }
 
         bool gripperJointIsRight(const std::string &joint_name) {
@@ -360,6 +369,34 @@ namespace rokae_ros2_control {
                 config.feedback_reg =
                     get_hardware_parameter("gripper_feedback_reg", config.feedback_reg);
                 gripper_ = std::make_unique<Ag2f90dGripper>(
+                    get_node()->get_logger(),
+                    get_node()->get_clock(),
+                    gripper_joint_name,
+                    config);
+            } else if (isAg2f120SType(gripper_type) || isAg2f120SDType(gripper_type)) {
+                const bool is_d_variant = isAg2f120SDType(gripper_type);
+                Ag2f90dGripper::Config config = Ag2f120sGripper::makeConfig(is_d_variant);
+                config.slave_id = get_hardware_parameter("gripper_slave_id", config.slave_id);
+                config.close_pos = get_hardware_parameter("gripper_close_pos", config.close_pos);
+                config.max_opening_distance =
+                    get_hardware_parameter("gripper_max_opening_distance", config.max_opening_distance);
+                config.configure_xpanel =
+                    get_hardware_parameter("gripper_configure_xpanel", false);
+                config.read_interval_ms =
+                    get_hardware_parameter("gripper_read_interval_ms", 500);
+                config.normalized_torque = tool_torque;
+                config.normalized_velocity = tool_velocity;
+                config.velocity_reg = get_hardware_parameter("gripper_velocity_reg", config.velocity_reg);
+                config.torque_reg = get_hardware_parameter("gripper_torque_reg", config.torque_reg);
+                config.acceleration_reg = get_hardware_parameter("gripper_acceleration_reg", config.acceleration_reg);
+                config.deceleration_reg = get_hardware_parameter("gripper_deceleration_reg", config.deceleration_reg);
+                config.default_acceleration =
+                    get_hardware_parameter("gripper_default_acceleration", config.default_acceleration);
+                config.default_deceleration =
+                    get_hardware_parameter("gripper_default_deceleration", config.default_deceleration);
+                config.feedback_reg =
+                    get_hardware_parameter("gripper_feedback_reg", config.feedback_reg);
+                gripper_ = std::make_unique<Ag2f120sGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
                     gripper_joint_name,
