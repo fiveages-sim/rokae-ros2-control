@@ -26,6 +26,7 @@ add_library(${PROJECT_NAME} SHARED
         src/ag2f90d_gripper.cpp
         src/linkerhand_l6.cpp
         src/ag2f120s_gripper.cpp
+        src/erg32_gripper.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC

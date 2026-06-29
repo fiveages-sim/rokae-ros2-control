@@ -1,6 +1,7 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
 #include "rokae_ros2_control/ag2f120s_gripper.h"
+#include "rokae_ros2_control/erg32_gripper.h"
 #include "rokae_ros2_control/jodell_gripper.h"
 #include "rokae_ros2_control/linkerhand_l6.h"
 #include <pluginlib/class_list_macros.hpp>
@@ -321,7 +322,19 @@ namespace rokae_ros2_control {
             const double tool_velocity = clampToolParam(get_hardware_parameter(
                 is_right_gripper ? "right_tool_velocity" : "left_tool_velocity", 1.0));
 
-            if (gripper_type == "jodell" || gripper_type == "rg75" || gripper_type == "dual_rg75") {
+            if (gripper_type == "erg32") {
+                const auto erg32_joints = Erg32Gripper::detectJoints(params.hardware_info.joints);
+                if (erg32_joints.size() != 2) {
+                    RCLCPP_ERROR(get_node()->get_logger(),
+                                 "ERG32 requires rotate_joint and gripper_joint in ros2_control config");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+                gripper_ = std::make_unique<Erg32Gripper>(
+                    get_node()->get_logger(),
+                    get_node()->get_clock(),
+                    erg32_joints,
+                    Erg32Gripper::Config{tool_torque, tool_velocity});
+            } else if (gripper_type == "jodell" || gripper_type == "rg75" || gripper_type == "dual_rg75") {
                 gripper_ = std::make_unique<JodellGripper>(
                     get_node()->get_logger(),
                     get_node()->get_clock(),
