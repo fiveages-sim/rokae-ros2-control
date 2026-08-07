@@ -124,6 +124,8 @@ namespace rokae {
   * @class xMateModel
   * @brief xMate模型库。支持的机型: xMateER系列, XMC7/12, XMS3/4/5。
   * 注意：对于XMS5机型，需要升级特殊版本的机型文件后方可使用模型库，否则计算结果是错误的，请联系珞石技术支持人员进行机型文件升级。
+  * @note 重力方向在模型构造时自动从控制器读取（ix.coord.base_in_world），无需手动设置。
+  *       如需更新重力方向（如修改了基坐标系并重启控制器后），重连控制器并重新获取 model() 实例即可。
   * @tparam DoF 轴数
   */
  template <unsigned short DoF>
@@ -185,17 +187,35 @@ namespace rokae {
                                     SegmentFrame nr = SegmentFrame::flange );
 
    /**
-    * @brief 逆解获得关节空间位置。一个位姿可能对应多个关节角度，jntPos的选取原则是选取一个与jntInit最近的解。
+    * @brief 逆解获得关节空间位置。一个位姿可能对应多个关节角度，jntPos的选取原则是选取一个到该点关节角度变化最小的解。
     * @param[in] cartPos 法兰笛卡尔空间位姿
     * @param[in] elbow 臂角
     * @param[in] jntInit 初始关节角度
     * @param[out] jntPos 关节空间位置
-    * @return 计算逆解结果 -
-    *    1) -1, -2, -3: 无解，原因是cartPos超出机器人工作空间;
-    *    2) -4, -5: jntPos与jntInit相差较大，一般认为jntInit代表机器人当前位置，jntPos与jntInit之差可以等效为电机转速。
-    *               若超过机器人轴额定转速，则返回-4或-5;
-    *    3) -6, -7: jntPos超过软限位;
-    *    4)	-8: 机器人奇异；
+    * @return 计算逆解结果 
+    *    1) 0：逆解成功
+    *    2) 1：逆解失败，奇异点
+    *    3) 2：逆解失败，超关节软限位
+    *    4) 3：逆解失败，目标点超运动范围
+    *    5) 4-12：逆解失败，其他原因
+    */
+    int getJointPosNearst(const std::array<double, 16> &cartPos,
+                    double elbow,
+                    const std::array<double, DoF> &jntInit,
+                    std::array<double, DoF> &jntPos);
+
+   /**
+    * @brief 逆解获得关节空间位置。只求得一个与jntInit相邻的解。
+    * @param[in] cartPos 法兰笛卡尔空间位姿
+    * @param[in] elbow 臂角
+    * @param[in] jntInit 初始关节角度
+    * @param[out] jntPos 关节空间位置
+    * @return 计算逆解结果 
+    *    1) 0：逆解成功
+    *    2) 1：逆解失败，奇异点
+    *    3) 2：逆解失败，超关节软限位
+    *    4) 3：逆解失败，目标点超运动范围
+    *    5) 4-12：逆解失败，其他原因
     */
     int getJointPos(const std::array<double, 16> &cartPos,
                     double elbow,

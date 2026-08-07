@@ -1162,6 +1162,31 @@ namespace rokae {
    void setxPanelRS485(xPanelOpt::Vout opt, bool if_rs485, error_code& ec) noexcept;
 
    /**
+    * @brief 初始化xPanel RS485通信参数
+    * @param[in] baud 波特率
+    * @param[in] check_bit 校验位
+    * @param[in] stop_bit 停止位
+    * @param[out] ec 错误码
+    */
+   void xPanelRS485Init(xPanelCommOpt::Rs485Baud baud, xPanelCommOpt::CheckBit check_bit, xPanelCommOpt::StopBit stop_bit,
+                        error_code& ec) noexcept;
+
+   /**
+    * @brief 设置xPanel RS485通信超时时间
+    * @param[in] overtime_ms 通信超时时间(ms)，范围 50~10000
+    * @param[out] ec 错误码
+    */
+   void setxPanelRS485Overtime(int overtime_ms, error_code& ec) noexcept;
+
+   /**
+    * @brief 初始化xPanel CAN通信波特率参数
+    * @param[in] arbitration_baud 仲裁波特率
+    * @param[in] data_baud 数据波特率
+    * @param[out] ec 错误码
+    */
+   void xPanelCANInit(xPanelCommOpt::CanArbitrationBaud arbitration_baud, xPanelCommOpt::CanDataBaud data_baud, error_code& ec) noexcept;
+
+   /**
     * @brief 通过xPanel末端读写modbus寄存器
     * @param[in] slave_addr 设备地址 0-65535
     * @param[in] fun_cmd 功能码 0x03 0x04 0x06 0x10
