@@ -232,6 +232,68 @@ namespace rokae {
  };
 
  /**
+  * @struct xPanelCommOpt
+  * @brief xPanel通信参数配置
+  */
+ struct xPanelCommOpt {
+   /**
+    * @brief RS485波特率
+    * @note AR机型(xpanel type 3/4)支持: 4800, 9600, 19200, 38400, 57600, 115200, 2500000
+    * @note 其他机型支持: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 1000000, 2000000
+    */
+   enum class Rs485Baud {
+     baud4800 = 4800,
+     baud9600 = 9600,
+     baud19200 = 19200,
+     baud38400 = 38400,
+     baud57600 = 57600,
+     baud115200 = 115200,
+     baud230400 = 230400,
+     baud460800 = 460800,
+     baud1000000 = 1000000,
+     baud2000000 = 2000000,
+     baud2500000 = 2500000,
+   };
+
+   /**
+    * @brief RS485校验位
+    */
+   enum class CheckBit {
+     none, ///< 无校验
+     odd,  ///< 奇校验
+     even, ///< 偶校验
+   };
+
+   /**
+    * @brief RS485停止位
+    */
+   enum class StopBit {
+     stopbit1, ///< 1位停止位
+     stopbit2, ///< 2位停止位
+   };
+
+   /**
+    * @brief CAN仲裁波特率
+    */
+   enum class CanArbitrationBaud {
+     b1M = 1000000,   ///< 1 Mbps
+     b500k = 500000,  ///< 500 kbps
+     b250k = 250000,  ///< 250 kbps
+     b125k = 125000,  ///< 125 kbps
+   };
+
+   /**
+    * @brief CAN数据波特率
+    */
+   enum class CanDataBaud {
+     b5M = 5000000, ///< 5 Mbps
+     b4M = 4000000, ///< 4 Mbps
+     b2M = 2000000, ///< 2 Mbps
+     b1M = 1000000, ///< 1 Mbps
+   };
+ };
+
+ /**
   * @brief 奇异规避方式
   */
  enum class AvoidSingularityMethod {

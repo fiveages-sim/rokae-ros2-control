@@ -42,7 +42,7 @@ else()
     set(ROKAE_LIB_DIR "x86_64")
 endif()
 
-# Link librokae libraries (v0.5.1)
+# Link librokae libraries (v0.7.1.ar_9)
 target_link_libraries(${PROJECT_NAME} PUBLIC
         ${hardware_interface_TARGETS}
         ${rclcpp_TARGETS}

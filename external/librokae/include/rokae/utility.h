@@ -21,6 +21,10 @@
 #include <Eigen/LU>
 #include <Eigen/Dense>
 
+#if _MSC_VER
+#include <corecrt_math_defines.h>
+#endif
+
 namespace rokae {
  /**
   * @class Utils
@@ -199,9 +203,12 @@ namespace rokae {
     */
    static std::array<double, 4> eulerToQuaternion(const std::array<double, 3> &rpy) {
      using namespace Eigen;
-     Quaterniond q = AngleAxisd(rpy[0], Vector3d::UnitX()) * AngleAxisd(rpy[1], Vector3d::UnitY()) *
-       AngleAxisd(rpy[2], Vector3d::UnitZ());
-     return std::array<double, 4>{{ q.coeffs().w(), q.coeffs().x(), q.coeffs().y(), q.coeffs().z() }};
+     Quaterniond q =
+       AngleAxisd(rpy[2], Vector3d::UnitZ()) *  // yaw
+         AngleAxisd(rpy[1], Vector3d::UnitY()) *  // pitch
+         AngleAxisd(rpy[0], Vector3d::UnitX());   // roll
+
+     return { q.w(), q.x(), q.y(), q.z() };
    }
 
    /**

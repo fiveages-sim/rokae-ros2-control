@@ -160,16 +160,16 @@ namespace rokae {
      * @param robot rokae::Robot实例
      * @param model rokae::xMateModel实例, 通过robot.model()获取
      */
-   void init(Cobot<DoF>& robot, XMateModel<DoF>& model);
+   void init(Cobot<DoF>& robot, xMateModel<DoF>& model);
 
    /**
-    * @brief 开始目标跟随 - 笛卡尔位姿。该接口非阻塞。
+    * @brief 开始目标跟随 - 笛卡尔位姿。该接口非阻塞。随后update()更新点位也要传入笛卡尔位姿。
     * @param[in] bMe_desire 期望的目标位姿，为末端相对于基坐标系，即TCP位姿.
     */
    void start(const Eigen::Transform<double, 3, Eigen::Isometry>& bMe_desire);
 
    /**
-    * @brief 开始目标跟随 - 轴角度。该接口非阻塞。
+    * @brief 开始目标跟随 - 轴角度。该接口非阻塞。随后update()更新点位也要传入轴角度。
     * @param[in] jnt_desire 期望的轴角度
     */
    void start(const std::array<double, DoF> &jnt_desire);
@@ -180,14 +180,14 @@ namespace rokae {
    void stop();
 
    /**
-    * @brief 更新期望的位姿。
+    * @brief 更新期望的位姿，适用于start()时给笛卡尔位姿。
     * @note 跟随带有加减速过程，在接近目标点时减速，故更新的目标点不宜密集，更新频率不宜过快。更新间隔建议至少几十毫秒的量级
     * @param[in] bMe_desire 末端相对于基坐标系，即TCP位姿
     */
    void update(const Eigen::Transform<double, 3, Eigen::Isometry>& bMe_desire);
 
    /**
-    * @brief 更新期望的目标轴角度
+    * @brief 更新期望的目标轴角度，适用于start()时给轴角度。
     * @note 跟随带有加减速过程，在接近目标点时减速，故更新的目标点不宜密集，更新频率不宜过快。更新间隔建议至少几十毫秒的量级
     * @param[in] jnt_desired 轴角度, 单位: 弧度
     */

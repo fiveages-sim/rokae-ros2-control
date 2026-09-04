@@ -197,6 +197,15 @@ namespace rokae {
     */
    bool hasMotionError() noexcept;
 
+
+  /**
+   * @brief 绑定 _do_loop 实时线程到指定 CPU 核心
+   * @param cpu CPU 核心编号 (0 ~ nproc-1), -1 表示不绑核
+   * @note 需在 startLoop() 之前调用; 配合 isolcpus 隔离核心使用效果最佳
+   */
+  void setCpuAffinity(int cpu) noexcept;
+
+  
    /**
     * @brief 当错误发生后，自动恢复机器人。
     * @param[out] ec 错误码
@@ -342,12 +351,33 @@ namespace rokae {
    void setJointImpedance(const std::array<double, DoF> &factor, error_code &ec) noexcept;
 
    /**
+    * @brief 设置轴空间阻抗阻尼系数，轴空间阻抗运动时生效
+    * @param[in] factor 
+    * @param[out] ec 错误码
+    */
+   void setJointImpedanceDamp(const std::array<double, DoF> &factor, error_code &ec) noexcept;
+
+   /**
+    * @brief 设置力控关节位置安全限位阈值
+    * @param[in] threshold 限位角度，单位: rad，允许范围 [2°, 15°]，即 [2π/180, 15π/180]
+    * @param[out] ec 错误码
+    */
+   void setFcJntPosSafetyThreshold(double threshold, error_code &ec) noexcept;
+
+   /**
     * @brief 设置笛卡尔空间阻抗控制系数, 笛卡尔阻抗运动时生效
     * @param[in] factor 阻抗系数[ X, Y, Z, Rx, Ry, Rz], 最大值为 { 3000, 3000, 3000, 300, 300, 300 }, 单位: N/m, Nm/rad
     * 实际有效的最大值和传感器等硬件状态有关系，如发生抖动等现象，请尝试减小阻抗系数。
     * @param[out] ec 错误码
     */
    void setCartesianImpedance(const std::array<double, 6> &factor, error_code &ec) noexcept;
+
+   /**
+    * @brief 设置笛卡尔空间阻抗阻尼系数，笛卡尔阻抗运动时生效。
+    * @param[in] factor 
+    * @param[out] ec 错误码
+    */
+   void setCartesianImpedanceDamp(const std::array<double, 6> &factor, error_code &ec) noexcept;
 
    /**
     * @brief 设置机器人控制器的滤波截止频率，用来平滑指令。允许的范围: 1 ~ 1000Hz, 建议设置为10 ~ 100Hz。
