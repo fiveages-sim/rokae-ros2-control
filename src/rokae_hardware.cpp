@@ -1168,7 +1168,9 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::stopRealtimeControl() {
-        if (!rt_control_running_) {
+        // A finished-but-unjoined control thread can still leave the controller-side
+        // realtime move active. Treat either condition as a session that must be stopped.
+        if (!rt_control_running_ && !rt_control_thread_.joinable()) {
             return;
         }
 
@@ -1196,22 +1198,10 @@ namespace rokae_ros2_control {
             return;
         }
 
-        try {
-            std::error_code ec;
-            RCLCPP_INFO(get_node()->get_logger(), "Sending arm power-off command before controller cleanup...");
-            arm_robot_->setPowerState(false, ec);
-            if (ec) {
-                RCLCPP_WARN(get_node()->get_logger(), "Early arm power-off command failed: %s", ec.message().c_str());
-            } else {
-                RCLCPP_INFO(get_node()->get_logger(), "Early arm power-off command sent");
-            }
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Early arm power-off command threw: %s", e.what());
-        }
-
-        if (rt_control_running_) {
-            stopRealtimeControl();
-        }
+        // The SDK requires stopMove() before power-off or other mode-changing
+        // commands once realtime motion has started. stopRealtimeControl() issues
+        // stopMove() first and then joins the realtime loop thread.
+        stopRealtimeControl();
 
         if (state_update_running_) {
             stopStateUpdate();
