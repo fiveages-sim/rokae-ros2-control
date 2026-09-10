@@ -74,32 +74,58 @@ JodellGripper::~JodellGripper() {
 
 
 bool JodellGripper::initialize(rokae::xMateErProRobot& robot) {
+    using Clock = std::chrono::steady_clock;
+
     // 保存机器人对象指针，供后台线程使用
     robot_ptr_ = &robot;
 
     uint8_t init_status = 0;
     bool init_finished = false;
-    if (!gripGetInitStatus(robot, init_status, init_finished)) {
-        RCLCPP_WARN(logger_, "Unable to read Jodell status before initialization; trying initialization command");
-    } else if (init_finished) {
+    bool init_status_read = false;
+    auto last_transaction_start = Clock::now();
+    for (int attempt = 1; attempt <= INIT_STATUS_READ_ATTEMPTS; ++attempt) {
+        last_transaction_start = Clock::now();
+        if (gripGetInitStatus(robot, init_status, init_finished)) {
+            init_status_read = true;
+            break;
+        }
+        if (attempt < INIT_STATUS_READ_ATTEMPTS) {
+            std::this_thread::sleep_until(
+                last_transaction_start + COMMUNICATION_INTERVAL);
+        }
+    }
+
+    if (!init_status_read) {
+        RCLCPP_ERROR(logger_,
+                     "Unable to determine Jodell initialization state after %d attempts; "
+                     "initialization command will not be sent",
+                     INIT_STATUS_READ_ATTEMPTS);
+        return false;
+    }
+
+    if (init_finished) {
         RCLCPP_INFO(logger_, "Jodell gripper is already initialized");
     }
 
     if (!init_finished) {
+        std::this_thread::sleep_until(last_transaction_start + COMMUNICATION_INTERVAL);
         if (!gripInit(robot)) {
             return false;
         }
 
         const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(INIT_TIMEOUT_MS);
+            Clock::now() + std::chrono::milliseconds(INIT_TIMEOUT_MS);
         uint8_t previous_status = 0xff;
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (Clock::now() < deadline) {
+            last_transaction_start = Clock::now();
             if (gripGetInitStatus(robot, init_status, init_finished)) {
                 if (init_status != previous_status) {
                     RCLCPP_INFO(logger_, "Jodell initialize status: %u", init_status);
                     previous_status = init_status;
                 }
                 if (init_finished) {
+                    std::this_thread::sleep_until(
+                        last_transaction_start + COMMUNICATION_INTERVAL);
                     break;
                 }
             }
@@ -110,16 +136,26 @@ bool JodellGripper::initialize(rokae::xMateErProRobot& robot) {
             RCLCPP_ERROR(logger_, "Jodell initialization timed out after %d ms", INIT_TIMEOUT_MS);
             return false;
         }
+    } else {
+        std::this_thread::sleep_until(last_transaction_start + COMMUNICATION_INTERVAL);
     }
 
+    // 这里只读取实际位置来同步ROS状态和命令基准，不发送初始位置命令。
     std::vector<int> robot_stats;
+    last_transaction_start = Clock::now();
     if (gripGetStatus(robot, robot_stats)) {
         updateStatusFromRegisters(robot_stats);
+        copyStatusSnapshot();
         position_command_ = physical_position_;
         last_command_ = physical_position_;
+    } else {
+        RCLCPP_WARN(logger_,
+                    "Unable to read Jodell position after initialization; preserving default state");
     }
 
-    initialized_ = true;
+    // 防止后台线程在最终状态读取后立即发起下一笔事务。
+    std::this_thread::sleep_until(last_transaction_start + COMMUNICATION_INTERVAL);
+    initialized_.store(true, std::memory_order_release);
     RCLCPP_INFO(logger_, "Jodell gripper initialization succeeded");
     return true;
 }
@@ -129,10 +165,9 @@ bool JodellGripper::readStatusPeriodic() {
         return false;
     }
 
-    // 读取操作已在后台线程中异步执行，这里只返回成功
-    // 状态数据通过 status_mutex_ 保护，后台线程会定期更新
-    // 主线程可以安全地读取 physical_position_ 等状态（已通过互斥锁保护）
-    return true;
+    // Modbus读取由后台线程执行；ros2_control线程只复制完整快照，避免
+    // controller_manager与通信线程同时访问导出的状态变量。
+    return copyStatusSnapshot();
 }
 
 bool JodellGripper::writeCommandPeriodic() {
@@ -191,11 +226,13 @@ bool JodellGripper::writeCommandPeriodic() {
 }
 
 bool JodellGripper::gripInit(rokae::xMateErProRobot& robot) {
+    using Clock = std::chrono::steady_clock;
     std::error_code ec;
     
     // 第一步：写入 0x00 初始化
     int num_write = 1;
     std::vector<int> init_set = {0x00};
+    const auto reset_start = Clock::now();
     robot.XPRWModbusRTUReg(SLAVE_ADDRESS, INIT_FUNC_CODE, INIT_REG_ADDR, "int16", 
                            num_write, init_set, false, ec);
     RCLCPP_INFO(logger_, "Jodell初始化执行结果 1: %d, %d", ec.value(), init_set[0]);
@@ -203,9 +240,12 @@ bool JodellGripper::gripInit(rokae::xMateErProRobot& robot) {
         RCLCPP_ERROR(logger_, "Failed to reset Jodell initialization: %s", ec.message().c_str());
         return false;
     }
-    
+
+    std::this_thread::sleep_until(reset_start + COMMUNICATION_INTERVAL);
+
     // 第二步：写入 0x01 启动初始化
     std::vector<int> init_set_up = {0x01};
+    const auto activate_start = Clock::now();
     robot.XPRWModbusRTUReg(SLAVE_ADDRESS, INIT_FUNC_CODE, INIT_REG_ADDR, "int16", 
                            num_write, init_set_up, false, ec);
     RCLCPP_INFO(logger_, "Jodell初始化执行结果 2: %d, %d", ec.value(), init_set_up[0]);
@@ -213,6 +253,8 @@ bool JodellGripper::gripInit(rokae::xMateErProRobot& robot) {
         RCLCPP_ERROR(logger_, "Failed to start Jodell initialization: %s", ec.message().c_str());
         return false;
     }
+
+    std::this_thread::sleep_until(activate_start + COMMUNICATION_INTERVAL);
     return true;
 }
 
@@ -232,9 +274,13 @@ void JodellGripper::gripMove(rokae::xMateErProRobot& robot, int trq_set, int vel
     robot.XPRWModbusRTUReg(SLAVE_ADDRESS, INIT_FUNC_CODE, INIT_REG_ADDR, "int16", 
                            num_write, trq_set_vec, false, ec);
     if (ec) {
-        RCLCPP_ERROR_THROTTLE(
+        // RG75在启动实际运动时可能已经接受命令，但SDK未在超时窗口内
+        // 收到正常应答。后续FC04状态读取负责确认实际执行结果。
+        RCLCPP_DEBUG_THROTTLE(
             logger_, *clock_, 1000,
-            "Failed to send Jodell movement command: %s", ec.message().c_str());
+            "Jodell movement command was not acknowledged normally; "
+            "execution will be checked by status reads: %s",
+            ec.message().c_str());
     }
 }
 
@@ -296,44 +342,80 @@ void JodellGripper::updateStatusFromRegisters(const std::vector<int>& robot_stat
     const uint8_t object_status = (new_status_byte >> 6) & 0x03;
     const bool object_detected = object_status == 0x01 || object_status == 0x02;
     
+    StatusSnapshot snapshot;
+    snapshot.position = new_position;
+    snapshot.physical_position = new_physical_position;
+    snapshot.velocity = static_cast<double>(new_velocity);
+    // RG75 register 2 high byte is the configured/raw force byte, not a reliable
+    // continuous contact force. Expose effort as a contact flag decoded from
+    // the gripper object-status bits so adaptive force feedback only triggers
+    // on actual object detection.
+    snapshot.effort = object_detected ? 1.0 : 0.0;
+    snapshot.stopped = new_stopped;
+    snapshot.status_byte = new_status_byte;
+    snapshot.error_code = new_error_code;
+
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
-        position_ = new_position;
-        physical_position_ = new_physical_position;
-        velocity_ = static_cast<double>(new_velocity);
-        // RG75 register 2 high byte is the configured/raw force byte, not a reliable
-        // continuous contact force. Expose effort as a contact flag decoded from
-        // the gripper object-status bits so adaptive force feedback only triggers
-        // on actual object detection.
-        effort_ = object_detected ? 1.0 : 0.0;
-        stopped_ = new_stopped;
-        status_byte_ = new_status_byte;
-        error_code_ = new_error_code;
+        background_status_ = snapshot;
+        background_status_valid_ = true;
     }
     (void)raw_force;
 }
 
-void JodellGripper::readStatusInternal(rokae::xMateErProRobot& robot) {
+bool JodellGripper::copyStatusSnapshot() {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    if (!background_status_valid_) {
+        return false;
+    }
+
+    position_ = background_status_.position;
+    physical_position_ = background_status_.physical_position;
+    velocity_ = background_status_.velocity;
+    effort_ = background_status_.effort;
+    stopped_ = background_status_.stopped;
+    status_byte_ = background_status_.status_byte;
+    error_code_ = background_status_.error_code;
+    return true;
+}
+
+bool JodellGripper::readStatusInternal(rokae::xMateErProRobot& robot) {
     std::vector<int> robot_stats;
     if (!gripGetStatus(robot, robot_stats)) {
-        return;
+        return false;
     }
     updateStatusFromRegisters(robot_stats);
+    return true;
 }
 
 void JodellGripper::readStatusInBackground() {
-    if (robot_ptr_ == nullptr || !initialized_) {
+    if (!initialized_.load(std::memory_order_acquire) || robot_ptr_ == nullptr) {
         return;
     }
     
     try {
-        readStatusInternal(*robot_ptr_);
+        if (!readStatusInternal(*robot_ptr_)) {
+            return;
+        }
+        StatusSnapshot snapshot;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            if (!background_status_valid_) {
+                return;
+            }
+            snapshot = background_status_;
+        }
         RCLCPP_DEBUG_THROTTLE(
             logger_,
             *clock_,
             1000,
             "Gripper state: position=%.6f m (normalized=%.3f), force=%.0f, velocity=%.0f, status=0x%02x, error=0x%02x",
-            physical_position_, position_, effort_, velocity_, status_byte_, error_code_
+            snapshot.physical_position,
+            snapshot.position,
+            snapshot.effort,
+            snapshot.velocity,
+            snapshot.status_byte,
+            snapshot.error_code
         );
     } catch (const std::exception& e) {
         RCLCPP_ERROR_THROTTLE(
@@ -350,65 +432,44 @@ void JodellGripper::sendCommand(rokae::xMateErProRobot& robot, int pos_set, int 
 }
 
 void JodellGripper::commandThreadFunction() {
-    auto last_read_time = std::chrono::steady_clock::now();
+    using Clock = std::chrono::steady_clock;
+    auto next_transaction_time = Clock::now();
     
     while (thread_running_) {
         Command cmd;
         bool has_command = false;
-        
-        // 等待队列中有命令或线程停止信号，或到达读取时间
+
+        // 所有运行期Modbus事务按15Hz限频。新命令可以唤醒线程，但不能
+        // 绕过下一个事务槽，以保证相邻事务的开始时间至少间隔66.667ms。
         {
             std::unique_lock lock(queue_mutex_);
-            auto now = std::chrono::steady_clock::now();
-            auto time_since_read = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - last_read_time).count();
-            
-            // 如果到达读取时间或队列有命令，则处理
-            bool should_read = time_since_read >= READ_INTERVAL_MS;
-            bool has_queue_command = !command_queue_.empty();
-            
-            if (!should_read && !has_queue_command) {
-                // 等待到下一个读取时间或队列有命令
-                auto wait_time = std::chrono::milliseconds(READ_INTERVAL_MS - time_since_read);
-                queue_cv_.wait_for(lock, wait_time, [this] { 
-                    return !command_queue_.empty() || !thread_running_; 
-                });
+            while (thread_running_ && Clock::now() < next_transaction_time) {
+                queue_cv_.wait_until(lock, next_transaction_time);
             }
-            
+
             if (!thread_running_) {
                 break;
             }
-            
-            // 检查是否需要读取状态
-            now = std::chrono::steady_clock::now();
-            time_since_read = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - last_read_time).count();
-            
-            if (time_since_read >= READ_INTERVAL_MS) {
-                // 在锁外执行读取，避免阻塞队列操作
-                lock.unlock();
-                readStatusInBackground();
-                last_read_time = std::chrono::steady_clock::now();
-                lock.lock();
-            }
-            
-            // 处理队列中的命令
+
+            // 命令优先；没有新命令时，本事务槽用于读取状态。
             if (!command_queue_.empty()) {
                 cmd = command_queue_.front();
                 command_queue_.pop();
                 has_command = true;
             }
         }
-        
-        // 在锁外执行命令，避免阻塞队列操作
-        if (has_command && robot_ptr_ != nullptr && initialized_) {
+
+        const auto transaction_start = Clock::now();
+        if (initialized_.load(std::memory_order_acquire) && robot_ptr_ != nullptr) {
             try {
-                // 发送两次命令以提高可靠性
-                sendCommand(*robot_ptr_, cmd.pos_set, cmd.trq_set, cmd.vel_set);
-                sendCommand(*robot_ptr_, cmd.pos_set, cmd.trq_set, cmd.vel_set);
-                
-                RCLCPP_DEBUG(logger_, "Gripper command sent from queue: pos=%d, trq=%d, vel=%d", 
-                            cmd.pos_set, cmd.trq_set, cmd.vel_set);
+                if (has_command) {
+                    sendCommand(*robot_ptr_, cmd.pos_set, cmd.trq_set, cmd.vel_set);
+                    RCLCPP_DEBUG(logger_,
+                                 "Gripper command sent from queue: pos=%d, trq=%d, vel=%d",
+                                 cmd.pos_set, cmd.trq_set, cmd.vel_set);
+                } else {
+                    readStatusInBackground();
+                }
             } catch (const std::exception& e) {
                 RCLCPP_ERROR_THROTTLE(
                     logger_,
@@ -418,6 +479,8 @@ void JodellGripper::commandThreadFunction() {
                 );
             }
         }
+
+        next_transaction_time = transaction_start + COMMUNICATION_INTERVAL;
     }
 }
 
