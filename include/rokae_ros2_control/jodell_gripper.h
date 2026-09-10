@@ -15,6 +15,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
 
 namespace rokae_ros2_control {
 
@@ -74,7 +75,7 @@ public:
     // 访问器方法
     bool hasGripper() const override { return !joint_name_.empty(); }
     const std::string& getJointName() const override { return joint_name_; }
-    bool isInitialized() const override { return initialized_; }
+    bool isInitialized() const override { return initialized_.load(std::memory_order_acquire); }
 
     // 状态数据指针（用于ROS2 Control接口）
     // 注意：position 和 position_command 现在使用物理位置（米）而不是归一化值
@@ -118,7 +119,7 @@ private:
     bool dynamics_dirty_ = false;            // 速度/力矩参数是否需要重发
     uint8_t status_byte_ = 0;                // 状态字节
     uint8_t error_code_ = 0;                 // 错误码字节
-    bool initialized_ = false;               // 夹爪是否已初始化
+    std::atomic<bool> initialized_ = false;  // 夹爪是否已初始化（跨线程发布robot_ptr_）
     
     // 物理参数
     static constexpr double MAX_OPENING_DISTANCE = 0.038372;  // 最大张开距离（米）
@@ -136,9 +137,22 @@ private:
     std::atomic<bool> thread_running_ = false;  // 线程运行标志
     rokae::xMateErProRobot* robot_ptr_ = nullptr;  // 机器人对象指针（用于后台线程）
     
-    // 状态读取相关（异步读取）
+    // 状态读取及Modbus事务调度（异步，15Hz）
+    struct StatusSnapshot {
+        double position = 0.0;
+        double physical_position = 0.0;
+        double velocity = 0.0;
+        double effort = 0.0;
+        bool stopped = true;
+        uint8_t status_byte = 0;
+        uint8_t error_code = 0;
+    };
+
     std::mutex status_mutex_;                // 状态数据互斥锁
-    static constexpr int READ_INTERVAL_MS = 500;  // 后台线程读取间隔（毫秒），2Hz
+    StatusSnapshot background_status_;       // 仅由通信线程更新的状态快照
+    bool background_status_valid_ = false;
+    static constexpr auto COMMUNICATION_INTERVAL = std::chrono::microseconds(66667);
+    static constexpr int INIT_STATUS_READ_ATTEMPTS = 3;
     static constexpr int INIT_POLL_INTERVAL_MS = 100;
     static constexpr int INIT_TIMEOUT_MS = 10000;
 
@@ -181,7 +195,8 @@ private:
 
     // 内部辅助方法 - 状态处理
     void updateStatusFromRegisters(const std::vector<int>& robot_stats);
-    void readStatusInternal(rokae::xMateErProRobot& robot);
+    bool copyStatusSnapshot();
+    bool readStatusInternal(rokae::xMateErProRobot& robot);
     void sendCommand(rokae::xMateErProRobot& robot, int pos_set, int trq_set, int vel_set);
     
     // 后台线程处理函数
