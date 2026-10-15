@@ -1,7 +1,7 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
 #include "rokae_ros2_control/jodell_gripper.h"
-#include "rokae_ros2_control/linkerhand_l6.h"
+#include "rokae_ros2_control/linkerhand.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <sstream>
 #include <iomanip>
@@ -76,22 +76,6 @@ namespace rokae_ros2_control {
             }
 
             return "";
-        }
-
-        std::vector<std::string> detectL6Joints(
-            const std::vector<hardware_interface::ComponentInfo>& joints) {
-            static const std::array<const char*, 6> suffixes = {
-                "thumb_joint1", "thumb_joint2", "index_joint",
-                "middle_joint", "ring_joint", "pinky_joint"};
-            std::vector<std::string> result;
-            result.reserve(suffixes.size());
-            for (const char* suffix : suffixes) {
-                const auto it = std::find_if(joints.begin(), joints.end(), [suffix](const auto& joint) {
-                    return joint.name.find(suffix) != std::string::npos;
-                });
-                if (it != joints.end()) result.push_back(it->name);
-            }
-            return result;
         }
 
         bool isAg2f90CType(const std::string &gripper_type) {
@@ -319,17 +303,38 @@ namespace rokae_ros2_control {
                     gripper_joint_name,
                     tool_torque,
                     tool_velocity);
-            } else if (gripper_type == "linkerhand_l6" || gripper_type == "l6") {
-                const auto hand_joints = detectL6Joints(params.hardware_info.joints);
-                LinkerHandL6::Config config;
+            } else if (linkerhand::isSupported(gripper_type)) {
+                LinkerHand::Config config;
+                config.hand_type = gripper_type;
+                config.right_hand = is_right_gripper;
                 config.slave_id = get_hardware_parameter(
                     "hand_slave_id", is_right_gripper ? 0x27 : 0x28);
                 config.configure_xpanel = get_hardware_parameter("hand_configure_xpanel", false);
                 config.read_interval_ms = get_hardware_parameter("hand_read_interval_ms", 100);
                 config.normalized_torque = tool_torque;
                 config.normalized_velocity = tool_velocity;
-                gripper_ = std::make_unique<LinkerHandL6>(
-                    get_node()->get_logger(), get_node()->get_clock(), hand_joints, config);
+                try {
+                    const auto model = linkerhand::modelFor(gripper_type, is_right_gripper);
+                    const auto hand_joints = linkerhand::orderedJoints(model, joint_names_);
+                    // Export routines keep arm joints first and export hand interfaces separately.
+                    if (joint_names_.size() != 7 + hand_joints.size()) {
+                        throw std::invalid_argument("Expected 7 arm joints plus " +
+                            std::to_string(hand_joints.size()) + " LinkerHand joints");
+                    }
+                    for (size_t i = 0; i < joint_names_.size(); ++i) {
+                        const bool is_hand = std::find(hand_joints.begin(), hand_joints.end(),
+                                                       joint_names_[i]) != hand_joints.end();
+                        if (is_hand != (i >= 7)) {
+                            throw std::invalid_argument("LinkerHand joints must follow the 7 arm joints");
+                        }
+                    }
+                    gripper_ = std::make_unique<LinkerHand>(
+                        get_node()->get_logger(), get_node()->get_clock(), hand_joints, config);
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(get_node()->get_logger(), "Invalid %s configuration: %s",
+                                 gripper_type.c_str(), e.what());
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
             } else if (isAg2f90Type(gripper_type)) {
                 Ag2f90dGripper::Config config;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
@@ -365,10 +370,14 @@ namespace rokae_ros2_control {
                     gripper_joint_name,
                     config);
             } else {
-                RCLCPP_WARN(get_node()->get_logger(),
-                            "Unknown Rokae gripper_type '%s', continuing without gripper",
-                            gripper_type.c_str());
+                RCLCPP_ERROR(get_node()->get_logger(),
+                             "Unsupported Rokae gripper_type '%s'; refusing to treat end-effector joints as arm joints",
+                             gripper_type.c_str());
+                return hardware_interface::CallbackReturn::ERROR;
             }
+        } else if (linkerhand::isSupported(get_hardware_parameter("gripper_type", std::string{}))) {
+            RCLCPP_ERROR(get_node()->get_logger(), "LinkerHand configured without any hand joints");
+            return hardware_interface::CallbackReturn::ERROR;
         }
 
         try {

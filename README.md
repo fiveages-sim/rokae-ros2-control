@@ -64,13 +64,43 @@ and state are normalized: `0.0` is closed, and `1.0` is fully open. If a
 configured gripper is not connected, the exported state stays at `0.0` instead
 of an invalid sentinel value.
 
-### LinkerHand L6
+### LinkerHand O6 / O7 / L6
 
-`gripper_type=linkerhand_l6`（或 `l6`）通过 Rokae 末端 RS485 控制 L6。
-Modbus RTU 左右手地址分别为 `0x28`、`0x27`；`FC04` 读取 0-5
-位置寄存器，`FC16` 写入 0-17 位置、力矩和速度寄存器。为满足 Rokae SDK
-单次最多 3 个 `int16` 寄存器的限制，请求按连续 3 寄存器分帧。可选参数为
-`hand_slave_id`、`hand_configure_xpanel` 和 `hand_read_interval_ms`。
+`gripper_type` 支持 `linkerhand_o6`、`linkerhand_o7`、`linkerhand_l6`，
+也支持短名 `o6`、`o7`、`l6`。通过机械臂末端 RS485 的 Modbus RTU
+桥接通信，左右手默认地址分别为 `0x28`、`0x27`。
+
+| 型号 | 主控关节数 | 位置寄存器 | 力矩寄存器 | 速度寄存器 |
+| --- | --- | --- | --- | --- |
+| O6 / L6 | 6 | 0–5 | 6–11 | 12–17 |
+| O7 | 7 | 0–6 | 7–13 | 14–20 |
+
+`FC04` 读取位置，`FC16` 写入位置、力矩和速度。Rokae SDK 单次最多操作
+3 个 `int16` 寄存器；O7 每个寄存器区按 `3 + 3 + 1` 分帧，避免越界写入下一区。
+O7 的寄存器顺序为 `thumb_joint3`、`thumb_joint2`、`index_joint`、
+`middle_joint`、`ring_joint`、`pinky_joint`、`thumb_joint1`，与现有 USB-Modbus
+驱动一致。命令和反馈使用 URDF 关节弧度范围，按型号转换到原始值 0–255
+（0 为弯曲端，255 为伸直端）；O6 拇指横摆范围区分左右手。
+
+可选参数为 `hand_slave_id`、`hand_configure_xpanel`（默认 `false`）和
+`hand_read_interval_ms`（默认 100）。`*_tool_torque`、`*_tool_velocity`
+使用 0–1 的归一化值。保持 `hand_configure_xpanel=false` 时，需要提前在
+RobotAssist 中配置末端供电和 RS485 通信参数。
+
+WCE3 示例（右手 O7，O6 时将两处 `o7` 改为 `o6`）：
+
+```bash
+ros2 launch ocs2_arm_controller full_body.launch.py robot:=fiveages_wce3 \
+  right_type:=linkerhand_o7 hardware:=real xacro_right_ee_drive_type:=rokae_rs485
+```
+
+控制器为 `right_hand_controller`（左手为 `left_hand_controller`），不是
+`adaptive_gripper_controller`。RViz 的 `GripperControlPanel` 是共用的开合面板，
+也会向灵巧手控制器发送命令。
+
+配置需要包含 7 个机械臂关节，随后是该型号完整的主控手指关节；驱动按名称映射
+手指关节，允许手指关节在末尾任意排序。缺失、重复、混合左右手的关节及未知末端型号
+会使初始化失败，避免把手指关节计入机械臂自由度。
 
 ## 4. Load Configuration
 

@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.8)
 project(rokae_ros2_control)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 if (CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif ()
@@ -23,7 +26,7 @@ add_library(${PROJECT_NAME} SHARED
         src/rokae_hardware.cpp
         src/jodell_gripper.cpp
         src/ag2f90d_gripper.cpp
-        src/linkerhand_l6.cpp
+        src/linkerhand.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -72,6 +75,12 @@ install(
 )
 
 if (BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(linkerhand_protocol_test test/linkerhand_protocol_test.cpp)
+    target_include_directories(linkerhand_protocol_test PRIVATE include)
+    ament_add_gtest(linkerhand_interfaces_test test/linkerhand_interfaces_test.cpp)
+    target_include_directories(linkerhand_interfaces_test PRIVATE external/librokae/include ${EIGEN3_INCLUDE_DIRS})
+    target_link_libraries(linkerhand_interfaces_test ${PROJECT_NAME})
     find_package(ament_lint_auto REQUIRED)
     ament_lint_auto_find_test_dependencies()
 endif ()
