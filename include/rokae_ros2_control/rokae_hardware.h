@@ -155,15 +155,18 @@ namespace rokae_ros2_control {
 
         // 实时控制线程
         std::thread rt_control_thread_;
-        std::atomic<bool> rt_control_running_;
-        std::atomic<bool> rt_move_restart_requested_;
+        std::atomic<bool> rt_control_running_{false};
+        std::atomic<bool> rt_move_restart_requested_{false};
+        // Terminal for this SDK session; only fresh initialization clears a fault.
+        std::atomic<bool> rt_control_faulted_{false};
+        friend class RokaeHardwareTestPeer;
         std::mutex control_mode_mutex_;
         std::mutex data_mutex_;
 
         // 状态接收相关
-        std::atomic<bool> state_receive_started_;
+        std::atomic<bool> state_receive_started_{false};
         std::thread state_update_thread_;
-        std::atomic<bool> state_update_running_;
+        std::atomic<bool> state_update_running_{false};
 
         // xCoreSDK相关方法
         void initializeXCoreSDK();
@@ -175,6 +178,8 @@ namespace rokae_ros2_control {
         void startRealtimeControl();
 
         void stopRealtimeControl();
+
+        void latchRealtimeFault();
 
         void controlLoop();
 

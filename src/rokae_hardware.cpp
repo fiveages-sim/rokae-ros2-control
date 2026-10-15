@@ -619,6 +619,11 @@ namespace rokae_ros2_control {
         const std::vector<rclcpp::Parameter> &params) {
         rcl_interfaces::msg::SetParametersResult result;
         result.successful = true;
+        if (rt_control_faulted_) {
+            result.successful = false;
+            result.reason = "Rokae fault is latched; restart the hardware process";
+            return result;
+        }
 
         bool ctrl_mode_changed = false;
         bool joint_impedance_changed = false;
@@ -860,6 +865,11 @@ namespace rokae_ros2_control {
 
     hardware_interface::CallbackReturn
     RokaeHardware::on_activate(const rclcpp_lifecycle::State & /* previous_state */) {
+        if (rt_control_faulted_) {
+            RCLCPP_ERROR(get_node()->get_logger(),
+                         "Rokae fault is latched; restart the hardware process before activating");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
         RCLCPP_INFO(get_node()->get_logger(), "Activating RokaeHardware...");
 
         if (!arm_robot_) {
@@ -1016,6 +1026,8 @@ namespace rokae_ros2_control {
     hardware_interface::return_type RokaeHardware::read(
         const rclcpp::Time & /*time*/,
         const rclcpp::Duration & /*period*/) {
+        if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
+
         // 从缓存的状态数据获取关节信息
         if (arm_robot_ && state_receive_started_) {
             for (size_t i = 0; i < arm_joint_count_; ++i) {
@@ -1036,10 +1048,13 @@ namespace rokae_ros2_control {
     hardware_interface::return_type RokaeHardware::write(
         const rclcpp::Time & /*time*/,
         const rclcpp::Duration & /*period*/) {
-        // 启动实时控制线程（类似Dobot的延迟启动策略）
+        if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
+
+        // Initial lazy start only: faults remain latched and cannot trigger a restart.
         if (arm_robot_ && !rt_control_running_) {
             startRealtimeControl();
         }
+        if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
 
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
@@ -1107,6 +1122,7 @@ namespace rokae_ros2_control {
 
             // 初始化实时控制状态
             rt_control_running_ = false;
+            rt_control_faulted_ = false;
             rt_move_restart_requested_ = false;
             state_receive_started_ = false;
             state_update_running_ = false;
@@ -1153,7 +1169,7 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::startRealtimeControl() {
-        if (rt_control_running_) {
+        if (rt_control_running_ || rt_control_faulted_) {
             return;
         }
 
@@ -1172,7 +1188,21 @@ namespace rokae_ros2_control {
             RCLCPP_INFO(get_node()->get_logger(), "Realtime control started");
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Failed to start realtime control: %s", e.what());
-            rt_control_running_ = false;
+            latchRealtimeFault();
+        }
+    }
+
+    void RokaeHardware::latchRealtimeFault() {
+        // Publish the fault before clearing running, so write() never sees a restartable gap.
+        rt_control_faulted_ = true;
+        rt_control_running_ = false;
+        rt_move_restart_requested_ = false;
+        if (rt_controller_) {
+            try {
+                rt_controller_->stopMove();
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(get_node()->get_logger(), "Failed to stop faulted realtime move: %s", e.what());
+            }
         }
     }
 
@@ -1310,6 +1340,7 @@ namespace rokae_ros2_control {
                     constexpr int kMaxStartMoveAttempts = 5;
                     bool start_move_succeeded = false;
                     for (int attempt = 1; attempt <= kMaxStartMoveAttempts; ++attempt) {
+                        if (!rt_control_running_ || rt_control_faulted_) return;
                         try {
                             start_move_for_current_mode();
                             start_move_succeeded = true;
@@ -1320,7 +1351,7 @@ namespace rokae_ros2_control {
                             }
 
                             RCLCPP_WARN(get_node()->get_logger(),
-                                        "startMove rejected during ctrl_mode change (attempt %d/%d): %s",
+                                        "startMove rejected during startup/mode change (attempt %d/%d): %s",
                                         attempt, kMaxStartMoveAttempts, e.what());
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         }
@@ -1331,6 +1362,7 @@ namespace rokae_ros2_control {
                     }
                 }
 
+                if (!rt_control_running_ || rt_control_faulted_) break;
                 try {
                     rt_controller_->startLoop(true);
                 } catch (const std::exception &e) {
@@ -1354,12 +1386,12 @@ namespace rokae_ros2_control {
                 }
 
                 RCLCPP_WARN(get_node()->get_logger(), "Realtime move stopped unexpectedly");
-                rt_control_running_ = false;
+                latchRealtimeFault();
                 break;
             }
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Control loop error: %s", e.what());
-            rt_control_running_ = false;
+            if (rt_control_running_) latchRealtimeFault();
         }
     }
 
@@ -1380,7 +1412,7 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::stopStateUpdate() {
-        if (!state_update_running_) {
+        if (!state_update_running_ && !state_update_thread_.joinable()) {
             return;
         }
 
@@ -1405,7 +1437,9 @@ namespace rokae_ros2_control {
                     1000,
                     "State update error: %s", e.what()
                 );
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if (state_update_running_) latchRealtimeFault();
+                state_update_running_ = false;
+                return;
             }
 
             // 避免过度占用CPU

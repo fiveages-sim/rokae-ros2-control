@@ -102,7 +102,17 @@ ros2 launch ocs2_arm_controller full_body.launch.py robot:=fiveages_wce3 \
 手指关节，允许手指关节在末尾任意排序。缺失、重复、混合左右手的关节及未知末端型号
 会使初始化失败，避免把手指关节计入机械臂自由度。
 
-## 4. Load Configuration
+## 4. Runtime faults and retries
+
+首次启动或主动切换控制模式时，`startMove()` 最多尝试 5 次，失败间隔为 100 ms。
+尝试耗尽、实时循环异常/意外停止、实时线程启动失败或状态更新异常后，驱动锁定故障，
+尝试停止 SDK 实时运动。之后 `read()` / `write()` 返回 `ERROR`，不再重建控制线程，
+也不接受控制参数更新或再次激活。正常停用不清除该故障。
+
+排除故障后需要重启运控进程，重新初始化硬件；驱动不会在故障消失后自动恢复运动。
+主动修改 `ctrl_mode` / 阻抗参数产生的正常停止和重启仍然保留。
+
+## 5. Load Configuration
 
 The plugin applies an xCoreSDK `setLoad()` setting when it initializes the
 real-time motion controller. The default load is zero for every gripper type
