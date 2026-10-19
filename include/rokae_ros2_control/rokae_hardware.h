@@ -51,6 +51,10 @@ namespace rokae_ros2_control {
          */
         hardware_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State &previous_state) override;
 
+        hardware_interface::CallbackReturn on_error(const rclcpp_lifecycle::State &previous_state) override;
+        hardware_interface::CallbackReturn on_shutdown(const rclcpp_lifecycle::State &previous_state) override;
+        hardware_interface::CallbackReturn on_cleanup(const rclcpp_lifecycle::State &previous_state) override;
+
         /**
          * @brief 导出状态接口（位置、速度、力矩）
          * @return 状态接口列表（智能指针）
@@ -82,11 +86,11 @@ namespace rokae_ros2_control {
     private:
         // 关节数据存储（动态大小，根据配置）
         std::vector<double> joint_positions_; // 关节位置（弧度）
-        std::array<double, 7> joint_positions_array_; // 关节位置（弧度）
+        std::array<double, 7> joint_positions_array_{}; // 关节位置（弧度）
         std::vector<double> joint_velocities_; // 关节速度（弧度/秒）
-        std::array<double, 7> joint_velocities_array_; // 关节速度（弧度）
+        std::array<double, 7> joint_velocities_array_{}; // 关节速度（弧度）
         std::vector<double> joint_efforts_; // 关节力矩（N·m）
-        std::array<double, 7> joint_efforts_array_; // 关节力矩（弧度）
+        std::array<double, 7> joint_efforts_array_{}; // 关节力矩（弧度）
         std::vector<double> joint_position_commands_; // 关节位置命令（弧度）
         std::vector<double> joint_velocities_commands_; // 关节速度命令（弧度）
         std::vector<double> joint_efforts_commands_; // 关节力矩命令（牛顿）
@@ -155,6 +159,7 @@ namespace rokae_ros2_control {
 
         // 实时控制线程
         std::thread rt_control_thread_;
+        std::atomic<bool> hardware_active_{false};
         std::atomic<bool> rt_control_running_{false};
         std::atomic<bool> rt_move_restart_requested_{false};
         // Terminal for this SDK session; only fresh initialization clears a fault.
@@ -170,6 +175,13 @@ namespace rokae_ros2_control {
 
         // xCoreSDK相关方法
         void initializeXCoreSDK();
+
+        // Siblings in one controller-manager process must roll back before an
+        // activation error can abort the manager (destructors are not guaranteed).
+        std::string startup_group_{"default"};
+        void registerStartupGroup();
+        void unregisterStartupGroup();
+        void rollbackStartupGroup();
 
         void configureLoad(const hardware_interface::HardwareComponentInterfaceParams &params);
 

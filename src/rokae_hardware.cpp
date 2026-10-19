@@ -213,7 +213,36 @@ namespace rokae_ros2_control {
                 accelControl(error_acceleration, max_error_acceleration)));
     }
 
+    namespace {
+        std::mutex startup_group_mutex;
+        std::vector<RokaeHardware*> startup_members;
+    }
+
+    void RokaeHardware::registerStartupGroup() {
+        std::lock_guard<std::mutex> lock(startup_group_mutex);
+        if (std::find(startup_members.begin(), startup_members.end(), this) == startup_members.end()) {
+            startup_members.push_back(this);
+        }
+    }
+
+    void RokaeHardware::unregisterStartupGroup() {
+        std::lock_guard<std::mutex> lock(startup_group_mutex);
+        startup_members.erase(std::remove(startup_members.begin(), startup_members.end(), this), startup_members.end());
+    }
+
+    void RokaeHardware::rollbackStartupGroup() {
+        // Hold membership stable while stopping siblings; destruction unregisters first.
+        std::lock_guard<std::mutex> lock(startup_group_mutex);
+        for (auto* member : startup_members) {
+            if (member->startup_group_ != startup_group_) continue;
+            member->hardware_active_ = false;
+            member->rt_control_faulted_ = true;
+            member->shutdownRobot();
+        }
+    }
+
     RokaeHardware::~RokaeHardware() {
+        unregisterStartupGroup();
         shutdownRobot();
     }
 
@@ -453,16 +482,13 @@ namespace rokae_ros2_control {
                     command_filter_max_jerk_);
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
 
-        // 初始化xCoreSDK
-        try {
-            initializeXCoreSDK();
-            param_callback_handle_ = get_node()->add_on_set_parameters_callback(
-                std::bind(&RokaeHardware::paramCallback, this, std::placeholders::_1));
-            RCLCPP_INFO(get_node()->get_logger(), "✅ xCoreSDK initialized successfully");
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Failed to initialize xCoreSDK: %s", e.what());
-            return hardware_interface::CallbackReturn::ERROR;
-        }
+        // Loading a sibling must not change a robot's mode or start its UDP stream.
+        // A later activation error can abort controller_manager without destructors.
+        startup_group_ = get_hardware_parameter("startup_group", std::string("default"));
+        registerStartupGroup();
+        param_callback_handle_ = get_node()->add_on_set_parameters_callback(
+            std::bind(&RokaeHardware::paramCallback, this, std::placeholders::_1));
+        RCLCPP_INFO(get_node()->get_logger(), "Hardware loaded; robot connection deferred until activation");
 
         return hardware_interface::CallbackReturn::SUCCESS;
     }
@@ -766,7 +792,7 @@ namespace rokae_ros2_control {
             }
         }
 
-        if (switching_to_position) {
+        if (switching_to_position && hardware_active_) {
             if (!syncPositionCommandsToCurrentState("switching ctrl_mode to POSITION")) {
                 result.successful = false;
                 result.reason = "failed to sync position commands before switching to POSITION";
@@ -897,19 +923,14 @@ namespace rokae_ros2_control {
         }
         RCLCPP_INFO(get_node()->get_logger(), "Activating RokaeHardware...");
 
-        if (!arm_robot_) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Robot not initialized!");
-            return hardware_interface::CallbackReturn::ERROR;
-        }
-
         try {
+            initializeXCoreSDK();
             std::error_code ec;
 
             // 上电
             arm_robot_->setPowerState(true, ec);
             if (ec) {
-                RCLCPP_ERROR(get_node()->get_logger(), "Failed to power on arm: %s", ec.message().c_str());
-                return hardware_interface::CallbackReturn::ERROR;
+                throw std::runtime_error("Failed to power on arm: " + ec.message());
             }
 
             RCLCPP_INFO(get_node()->get_logger(), "✅ Arm powered on");
@@ -921,17 +942,19 @@ namespace rokae_ros2_control {
                 } else {
                     RCLCPP_WARN(get_node()->get_logger(), "⚠️ Gripper initialization failed");
                     if (dynamic_cast<Erg32Gripper*>(gripper_.get())) {
-                        gripper_->stop();
-                        shutdownRobot();
-                        return hardware_interface::CallbackReturn::ERROR;
+                        throw std::runtime_error("Required ERG32 initialization failed");
                     }
                 }
             }
 
             // 从当前机器人位置初始化命令位置，避免突然跳跃
             auto current_pos = arm_robot_->jointPos(ec);
-            if (!ec) {
-                for (size_t i = 0; i < arm_joint_count_ && i < current_pos.size(); ++i) {
+            if (!ec && current_pos.size() == arm_joint_count_ &&
+                std::all_of(current_pos.begin(), current_pos.end(), [](double q) { return std::isfinite(q); })) {
+                for (size_t i = 0; i < arm_joint_count_; ++i) {
+                    joint_positions_array_[i] = current_pos[i];
+                    joint_velocities_array_[i] = 0.0;
+                    joint_efforts_array_[i] = 0.0;
                     joint_positions_[i] = current_pos[i];
                     joint_position_commands_[i] = current_pos[i];
                     target_joint_position_commands_[i] = current_pos[i];
@@ -954,12 +977,16 @@ namespace rokae_ros2_control {
                 ss << "]";
                 RCLCPP_INFO(get_node()->get_logger(), "%s", ss.str().c_str());
             } else {
-                RCLCPP_WARN(get_node()->get_logger(), "Failed to read current position: %s", ec.message().c_str());
+                throw std::runtime_error("Failed to read initial arm position: " + ec.message());
             }
 
+            if (rt_control_faulted_) throw std::runtime_error("Realtime state failed during activation");
+            hardware_active_ = true;
             RCLCPP_INFO(get_node()->get_logger(), "✅ RokaeHardware activated and ready!");
         } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Failed to activate arm: %s", e.what());
+            RCLCPP_ERROR(get_node()->get_logger(), "Failed to activate arm: %s; rolling back startup group '%s'",
+                         e.what(), startup_group_.c_str());
+            rollbackStartupGroup();
             return hardware_interface::CallbackReturn::ERROR;
         }
 
@@ -974,6 +1001,23 @@ namespace rokae_ros2_control {
 
         RCLCPP_INFO(get_node()->get_logger(), "✅ RokaeHardware deactivated");
 
+        return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    hardware_interface::CallbackReturn RokaeHardware::on_error(const rclcpp_lifecycle::State &) {
+        hardware_active_ = false;
+        rt_control_faulted_ = true;
+        shutdownRobot();
+        return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    hardware_interface::CallbackReturn RokaeHardware::on_shutdown(const rclcpp_lifecycle::State &) {
+        shutdownRobot();
+        return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
+    hardware_interface::CallbackReturn RokaeHardware::on_cleanup(const rclcpp_lifecycle::State &) {
+        shutdownRobot();
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
@@ -1084,6 +1128,7 @@ namespace rokae_ros2_control {
         const rclcpp::Time & /*time*/,
         const rclcpp::Duration & /*period*/) {
         if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
+        if (!hardware_active_) return hardware_interface::return_type::OK;
 
         // Initial lazy start only: faults remain latched and cannot trigger a restart.
         if (arm_robot_ && !rt_control_running_) {
@@ -1127,14 +1172,15 @@ namespace rokae_ros2_control {
             std::error_code ec;
             arm_robot_->setOperateMode(rokae::OperateMode::automatic, ec);
             if (ec) {
-                RCLCPP_WARN(get_node()->get_logger(), "Failed to set operate mode: %s", ec.message().c_str());
+                throw std::runtime_error("Failed to set operate mode: " + ec.message());
             }
 
             // 设置运动控制模式为实时模式
             arm_robot_->setRtNetworkTolerance(100, ec);
+            if (ec) throw std::runtime_error("Failed to set realtime network tolerance: " + ec.message());
             arm_robot_->setMotionControlMode(rokae::MotionControlMode::RtCommand, ec);
             if (ec) {
-                RCLCPP_WARN(get_node()->get_logger(), "Failed to set motion control mode: %s", ec.message().c_str());
+                throw std::runtime_error("Failed to set motion control mode: " + ec.message());
             }
 
             // 获取实时控制器
@@ -1162,7 +1208,6 @@ namespace rokae_ros2_control {
 
             // 初始化实时控制状态
             rt_control_running_ = false;
-            rt_control_faulted_ = false;
             rt_move_restart_requested_ = false;
             state_receive_started_ = false;
             state_update_running_ = false;
@@ -1188,7 +1233,7 @@ namespace rokae_ros2_control {
                 startStateUpdate();
             } catch (const std::exception &e) {
                 RCLCPP_WARN(get_node()->get_logger(), "Failed to start robot state receiving: %s", e.what());
-                state_receive_started_ = false;
+                throw;
             }
 
             RCLCPP_INFO(get_node()->get_logger(), "xCoreSDK initialized for arm: %s", arm_ip_.c_str());
@@ -1209,7 +1254,7 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::startRealtimeControl() {
-        if (rt_control_running_ || rt_control_faulted_) {
+        if (!hardware_active_ || !rt_controller_ || rt_control_running_ || rt_control_faulted_) {
             return;
         }
 
@@ -1254,14 +1299,24 @@ namespace rokae_ros2_control {
         }
 
         rt_control_running_ = false;
+        rt_move_restart_requested_ = false;
 
         // 先停止SDK实时运动，释放controlLoop中的startLoop(true)，再等待线程退出。
         if (rt_controller_) {
+            std::lock_guard<std::mutex> lock(control_mode_mutex_);
             try {
                 rt_controller_->stopMove();
             } catch (const std::exception &e) {
                 RCLCPP_ERROR(get_node()->get_logger(),
                              "Error stopping realtime move: %s", e.what());
+            }
+        }
+
+        if (rt_controller_) {
+            try {
+                rt_controller_->stopLoop();
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(get_node()->get_logger(), "Error stopping SDK scheduler: %s", e.what());
             }
         }
 
@@ -1273,43 +1328,51 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::shutdownRobot() {
-        if (gripper_) gripper_->stop();
-        if (!arm_robot_) {
-            return;
-        }
-
-        // The SDK requires stopMove() before power-off or other mode-changing
-        // commands once realtime motion has started. stopRealtimeControl() issues
-        // stopMove() first and then joins the realtime loop thread.
+        hardware_active_ = false;
+        // Stop producers first, including finished-but-unjoined workers. Never let
+        // a tool transfer delay cancellation of the arm's realtime command loop.
         stopRealtimeControl();
+        stopStateUpdate();
+        if (gripper_) gripper_->stop();
+        if (!arm_robot_) return;
 
-        if (state_update_running_) {
-            stopStateUpdate();
-        }
-
-        try {
-            if (state_receive_started_) {
+        // Every cleanup step is independent: a failed stop/Idle RPC must not skip
+        // power-off, closing UDP ports, or disconnecting the SDK session.
+        const auto cleanup = [this](const char* label, const auto& action) {
+            try {
+                action();
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(get_node()->get_logger(), "%s for arm %s failed: %s",
+                             label, arm_ip_.c_str(), e.what());
+            }
+        };
+        if (state_receive_started_.exchange(false)) {
+            cleanup("Stop robot state receiving", [this] {
                 arm_robot_->stopReceiveRobotState();
-                state_receive_started_ = false;
                 RCLCPP_INFO(get_node()->get_logger(), "Robot state receiving stopped");
-            }
-
-            std::error_code ec;
-
-            arm_robot_->setMotionControlMode(rokae::MotionControlMode::Idle, ec);
-            if (ec) {
-                RCLCPP_WARN(get_node()->get_logger(), "Failed to set arm to idle mode: %s", ec.message().c_str());
-            }
-
-            arm_robot_->setPowerState(false, ec);
-            if (ec) {
-                RCLCPP_WARN(get_node()->get_logger(), "Failed to power off arm: %s", ec.message().c_str());
-            } else {
-                RCLCPP_INFO(get_node()->get_logger(), "✅ Arm powered off");
-            }
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Failed to shutdown arm safely: %s", e.what());
+            });
         }
+        cleanup("Set arm Idle", [this] {
+            std::error_code ec;
+            arm_robot_->setMotionControlMode(rokae::MotionControlMode::Idle, ec);
+            if (ec) throw std::runtime_error(ec.message());
+        });
+        cleanup("Power off arm", [this] {
+            std::error_code ec;
+            arm_robot_->setPowerState(false, ec);
+            if (ec) throw std::runtime_error(ec.message());
+            RCLCPP_INFO(get_node()->get_logger(), "✅ Arm powered off");
+        });
+        if (rt_controller_) {
+            rt_controller_->disconnectNetwork();
+            rt_controller_.reset();
+        }
+        cleanup("Disconnect arm", [this] {
+            std::error_code ec;
+            arm_robot_->disconnectFromRobot(ec);
+            if (ec) throw std::runtime_error(ec.message());
+        });
+        arm_robot_.reset();
     }
 
     void RokaeHardware::controlLoop() {
@@ -1347,7 +1410,11 @@ namespace rokae_ros2_control {
                         last_sent_joint_positions_.begin() + static_cast<std::ptrdiff_t>(arm_joint_count_));
                 }
 
-                return rokae::JointPosition(command_positions);
+                rokae::JointPosition command(command_positions);
+                // Covers cancellation between the startLoop guard and entering the
+                // SDK scheduler, so a late scheduler cannot send an endless hold.
+                if (!hardware_active_ || !rt_control_running_ || rt_control_faulted_) command.setFinished();
+                return command;
             };
 
             rt_controller_->setControlLoop(callback, 50, true);
@@ -1449,6 +1516,7 @@ namespace rokae_ros2_control {
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Failed to start state update thread: %s", e.what());
             state_update_running_ = false;
+            throw;
         }
     }
 
