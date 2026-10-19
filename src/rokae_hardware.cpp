@@ -21,7 +21,7 @@ namespace rokae_ros2_control {
         constexpr double kRealtimeControlDt = 0.001;
         constexpr double kEpsilon = 1.0e-9;
         constexpr bool kSdkFilterLimitEnable = true;
-        constexpr int kSdkFilterLimit = 10;
+        constexpr int kSdkFilterLimit = 1000;
         constexpr int kSdkFilterJointFrequency = 10;
         constexpr int kSdkFilterCartesianFrequency = 10;
         constexpr int kSdkFilterTorqueFrequency = 10;
