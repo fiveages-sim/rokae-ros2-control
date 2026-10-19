@@ -26,6 +26,7 @@ add_library(${PROJECT_NAME} SHARED
         src/rokae_hardware.cpp
         src/jodell_gripper.cpp
         src/ag2f90d_gripper.cpp
+        src/erg32_gripper.cpp
         src/linkerhand.cpp
 )
 
@@ -76,6 +77,9 @@ install(
 
 if (BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(erg32_test test/erg32_test.cpp)
+    target_include_directories(erg32_test PRIVATE external/librokae/include ${EIGEN3_INCLUDE_DIRS})
+    target_link_libraries(erg32_test ${PROJECT_NAME})
     ament_add_gtest(linkerhand_protocol_test test/linkerhand_protocol_test.cpp)
     target_include_directories(linkerhand_protocol_test PRIVATE include)
     ament_add_gtest(linkerhand_interfaces_test test/linkerhand_interfaces_test.cpp)

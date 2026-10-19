@@ -144,3 +144,59 @@ parameters are the normalized Tianji-style `*_tool_torque` and
 `*_tool_velocity`; they are converted to the RG75 force and velocity bytes
 (`0` to `255`). Reported `velocity` and `effort` state interfaces expose the
 raw velocity and force bytes read from status register `0x07D2`.
+
+## ERG32-150 rotating gripper (absolute position)
+
+`gripper_type=erg32` (`ERG32` also accepted) controls two joints through Rokae
+end-tool RS485. The seven arm joints must come first, followed by the matching
+`left_hand_rotate_joint` / `left_hand_gripper_joint` pair (or `right_hand_`, or
+unprefixed names); the last two joints may appear in either order.
+
+Rotation uses radians in `[-pi, pi]`, encoded as signed integer degrees. Grip
+uses **single-finger travel** in meters, `0.0` closed to `0.016` open, corresponding
+to 32 mm total finger travel. Only absolute rotation is sent; turn count and the
+unused relative-position register are zero. Multi-turn motion is not enabled.
+Use the existing `*_hand_controller` and ERG32 controller template; ordinary grip
+targets retain the rotation target.
+
+```xml
+<param name="gripper_type">erg32</param>
+<param name="gripper_slave_id">9</param>
+<param name="gripper_configure_xpanel">false</param>
+<param name="gripper_read_interval_ms">100</param>
+<param name="gripper_feedback_timeout_ms">1000</param>
+<param name="gripper_activation_timeout_ms">10000</param>
+<param name="right_tool_torque">0.2</param>
+<param name="right_tool_velocity">0.2</param>
+```
+
+Use the matching side's dynamics parameters. Torque and velocity apply to both
+axes, use normalized 0–1 device scales, and can be changed at runtime. **Zero is
+the device's minimum force/speed, not a stop command.** Set up compatible RS485
+settings and end-tool power in RobotAssist when `gripper_configure_xpanel=false`.
+Read interval must be at least 20 ms; feedback timeout must exceed read interval.
+The default interval is a starting point, not a guaranteed communication rate.
+
+Activation first reads status. An already ready device is preserved; otherwise
+both axes are reset and activated, and the driver waits for both `gSTA` fields.
+Activation can physically move the gripper. A device reporting faults must be
+serviced/reset explicitly; the driver does not automatically clear faults.
+Targets start from measured positions. Current-position parameters are staged
+with both triggers cleared before releasing stop; no startup motion is triggered. An initial
+angle outside the supported range or a nonzero turn-count feedback is rejected. Deactivation stops and joins the
+worker and writes `rSTOP` on both axes while retaining `rACT`.
+
+FC16 writes are split into grip parameters/trigger (2 registers), rotation
+parameters (3), then absolute trigger (1); only changed axes are triggered.
+FC03 status reads use three blocks of 3 registers, so feedback is not an atomic
+snapshot. The communication worker publishes private snapshots; ROS `read()`
+copies them into the exported interfaces. Position-derived velocity uses the
+steady-clock sampling interval. Effort is unavailable (`NaN`), since raw current
+bytes are not calibrated physical force/torque. Object-state/drop transitions and
+device fault bytes are logged; raw speed/current are not exposed as SI values.
+
+Initialization failure prevents hardware activation. Motion-transfer failures,
+device faults/loss of activation, out-of-range rotation feedback, and stale
+feedback stop both axes on a best-effort basis and propagate an error to the
+hardware's latched fault path. Restart the control process after resolving a
+runtime fault. A disconnected device cannot acknowledge the stop request.

@@ -15,6 +15,7 @@ public:
     virtual ~RokaeGripperInterface() = default;
 
     virtual bool initialize(rokae::xMateErProRobot& robot) = 0;
+    virtual void stop() {}
     virtual bool readStatusPeriodic() = 0;
     virtual bool writeCommandPeriodic() = 0;
 

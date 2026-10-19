@@ -1,6 +1,7 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
 #include "rokae_ros2_control/jodell_gripper.h"
+#include "rokae_ros2_control/erg32_gripper.h"
 #include "rokae_ros2_control/linkerhand.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <sstream>
@@ -303,6 +304,28 @@ namespace rokae_ros2_control {
                     gripper_joint_name,
                     tool_torque,
                     tool_velocity);
+            } else if (gripper_type == "erg32") {
+                Erg32Gripper::Config config;
+                config.slave_id = get_hardware_parameter("gripper_slave_id", 9);
+                config.configure_xpanel = get_hardware_parameter("gripper_configure_xpanel", false);
+                config.read_interval_ms = get_hardware_parameter("gripper_read_interval_ms", 100);
+                config.feedback_timeout_ms = get_hardware_parameter("gripper_feedback_timeout_ms", 1000);
+                config.activation_timeout_ms = get_hardware_parameter("gripper_activation_timeout_ms", 10000);
+                config.normalized_torque = tool_torque;
+                config.normalized_velocity = tool_velocity;
+                try {
+                    const auto names = erg32::orderedJoints(joint_names_);
+                    if (joint_names_.size() != 9 ||
+                        std::find(joint_names_.begin(), joint_names_.begin() + 7, names[0]) != joint_names_.begin() + 7 ||
+                        std::find(joint_names_.begin(), joint_names_.begin() + 7, names[1]) != joint_names_.begin() + 7) {
+                        throw std::invalid_argument("Expected 7 arm joints followed by 2 ERG32 joints");
+                    }
+                    gripper_ = std::make_unique<Erg32Gripper>(get_node()->get_logger(),
+                        std::vector<std::string>{names[0], names[1]}, config);
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(get_node()->get_logger(), "Invalid ERG32 configuration: %s", e.what());
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
             } else if (linkerhand::isSupported(gripper_type)) {
                 LinkerHand::Config config;
                 config.hand_type = gripper_type;
@@ -375,8 +398,10 @@ namespace rokae_ros2_control {
                              gripper_type.c_str());
                 return hardware_interface::CallbackReturn::ERROR;
             }
-        } else if (linkerhand::isSupported(get_hardware_parameter("gripper_type", std::string{}))) {
-            RCLCPP_ERROR(get_node()->get_logger(), "LinkerHand configured without any hand joints");
+        } else if (linkerhand::isSupported(get_hardware_parameter("gripper_type", std::string{})) ||
+                   get_hardware_parameter("gripper_type", std::string{}) == "erg32" ||
+                   get_hardware_parameter("gripper_type", std::string{}) == "ERG32") {
+            RCLCPP_ERROR(get_node()->get_logger(), "Multi-joint end effector configured without any hand joints");
             return hardware_interface::CallbackReturn::ERROR;
         }
 
@@ -767,7 +792,7 @@ namespace rokae_ros2_control {
             const double torque = is_right_gripper ? next_right_tool_torque : next_left_tool_torque;
             const double velocity = is_right_gripper ? next_right_tool_velocity : next_left_tool_velocity;
             gripper_->setToolDynamics(torque, velocity);
-            gripper_->writeCommandPeriodic();
+            if (dynamic_cast<Erg32Gripper*>(gripper_.get()) == nullptr) gripper_->writeCommandPeriodic();
         }
 
         if (control_mode_lock.owns_lock()) {
@@ -895,6 +920,11 @@ namespace rokae_ros2_control {
                     RCLCPP_INFO(get_node()->get_logger(), "✅ Gripper powered on");
                 } else {
                     RCLCPP_WARN(get_node()->get_logger(), "⚠️ Gripper initialization failed");
+                    if (dynamic_cast<Erg32Gripper*>(gripper_.get())) {
+                        gripper_->stop();
+                        shutdownRobot();
+                        return hardware_interface::CallbackReturn::ERROR;
+                    }
                 }
             }
 
@@ -1039,7 +1069,12 @@ namespace rokae_ros2_control {
 
         // 夹爪状态读取：定期读取（降低读取频率以减少Modbus负载）
         if (gripper_ && gripper_->isInitialized()) {
-            gripper_->readStatusPeriodic();
+            const bool ok = gripper_->readStatusPeriodic();
+            if (!ok && dynamic_cast<Erg32Gripper*>(gripper_.get())) {
+                latchRealtimeFault();
+                gripper_->stop();
+                return hardware_interface::return_type::ERROR;
+            }
         }
 
         return hardware_interface::return_type::OK;
@@ -1069,7 +1104,12 @@ namespace rokae_ros2_control {
 
         // 夹爪控制：检测命令变化并发送
         if (gripper_ && gripper_->isInitialized()) {
-            gripper_->writeCommandPeriodic();
+            const bool ok = gripper_->writeCommandPeriodic();
+            if (!ok && dynamic_cast<Erg32Gripper*>(gripper_.get())) {
+                latchRealtimeFault();
+                gripper_->stop();
+                return hardware_interface::return_type::ERROR;
+            }
         }
 
         return hardware_interface::return_type::OK;
@@ -1233,6 +1273,7 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::shutdownRobot() {
+        if (gripper_) gripper_->stop();
         if (!arm_robot_) {
             return;
         }
