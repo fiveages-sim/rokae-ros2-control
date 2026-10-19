@@ -41,8 +41,8 @@ AG2F90C/AG2F90D example:
   <param name="gripper_max_opening_distance">0.09</param>
   <param name="gripper_configure_xpanel">false</param>
   <param name="gripper_read_interval_ms">500</param>
-  <param name="right_tool_torque">1.0</param>
-  <param name="right_tool_velocity">1.0</param>
+  <param name="tool_torque">1.0</param>
+  <param name="tool_velocity">1.0</param>
 </hardware>
 ```
 
@@ -53,9 +53,8 @@ controller firmware support configuring xPanel RS485 from the SDK.
 Supported ChangingTek aliases are `ag2f90_c`, `ag2f90c`, `ag2f90`,
 `changingtek90c`, `ag2f90_d`, `ag2f90d`, and `changingtek90d`. The driver uses
 the matching feedback register for the C/D variant; `gripper_feedback_reg` can
-override it for unusual firmware. Tool dynamics follow the Tianji convention:
-`left_tool_torque`, `left_tool_velocity`, `right_tool_torque`, and
-`right_tool_velocity` are normalized `0.0` to `1.0` values and can be updated at
+override it for unusual firmware. Each Rokae hardware instance exposes `tool_torque` and `tool_velocity`.
+These are normalized `0.0` to `1.0` values and can be updated at
 runtime with `ros2 param set`. AG2F90 maps velocity and torque to registers
 `0x0104` and `0x0105`; these, plus acceleration/deceleration registers, can be
 overridden with `gripper_velocity_reg`, `gripper_torque_reg`,
@@ -83,7 +82,7 @@ O7 的寄存器顺序为 `thumb_joint3`、`thumb_joint2`、`index_joint`、
 （0 为弯曲端，255 为伸直端）；O6 拇指横摆范围区分左右手。
 
 可选参数为 `hand_slave_id`、`hand_configure_xpanel`（默认 `false`）和
-`hand_read_interval_ms`（默认 100）。`*_tool_torque`、`*_tool_velocity`
+`hand_read_interval_ms`（默认 100）。`tool_torque`、`tool_velocity`
 使用 0–1 的归一化值。保持 `hand_configure_xpanel=false` 时，需要提前在
 RobotAssist 中配置末端供电和 RS485 通信参数。
 
@@ -134,14 +133,14 @@ Jodell RG75 example:
 
 ```xml
 <param name="gripper_type">jodell</param>
-<param name="left_tool_torque">1.0</param>
-<param name="left_tool_velocity">1.0</param>
+<param name="tool_torque">1.0</param>
+<param name="tool_velocity">1.0</param>
 ```
 
 For RG75, position remains the physical opening distance in meters
 (`0.0` to `0.038372`) for the RViz prismatic joint. The preferred dynamics
-parameters are the normalized Tianji-style `*_tool_torque` and
-`*_tool_velocity`; they are converted to the RG75 force and velocity bytes
+parameters are the normalized instance-local `tool_torque` and
+`tool_velocity`; they are converted to the RG75 force and velocity bytes
 (`0` to `255`). Reported `velocity` and `effort` state interfaces expose the
 raw velocity and force bytes read from status register `0x07D2`.
 
@@ -166,11 +165,11 @@ targets retain the rotation target.
 <param name="gripper_read_interval_ms">100</param>
 <param name="gripper_feedback_timeout_ms">1000</param>
 <param name="gripper_activation_timeout_ms">10000</param>
-<param name="right_tool_torque">0.2</param>
-<param name="right_tool_velocity">0.2</param>
+<param name="tool_torque">0.2</param>
+<param name="tool_velocity">0.2</param>
 ```
 
-Use the matching side's dynamics parameters. Torque and velocity apply to both
+Set dynamics on the hardware node that owns the tool. Torque and velocity apply to both
 axes, use normalized 0–1 device scales, and can be changed at runtime. **Zero is
 the device's minimum force/speed, not a stop command.** Set up compatible RS485
 settings and end-tool power in RobotAssist when `gripper_configure_xpanel=false`.
@@ -200,3 +199,20 @@ device faults/loss of activation, out-of-range rotation feedback, and stale
 feedback stop both axes on a best-effort basis and propagate an error to the
 hardware's latched fault path. Restart the control process after resolving a
 runtime fault. A disconnected device cannot acknowledge the stop request.
+
+
+Each `RokaeHardware` node owns one arm and uses `tool_torque` / `tool_velocity`
+without side prefixes. For example:
+
+```bash
+ros2 param set /ar5_right_system tool_velocity 0.2
+ros2 param set /ar5_right_system tool_torque 0.3
+```
+
+The `left_tool_*` / `right_tool_*` names are removed for Rokae. Update custom
+hardware XML and scripts that explicitly set those names. Tianji's dual-arm
+`MarvinHardware` and separate USB/CAN end-effector drivers retain their existing
+parameter names. Controller topics, actions, joint names, and position commands
+are unchanged. The inspected `fa-py-libraries/ros2_robot_interface` checkout does
+not hard-code the removed parameters; its generic parameter-setting API still
+requires callers to supply the new names when addressing a Rokae hardware node.

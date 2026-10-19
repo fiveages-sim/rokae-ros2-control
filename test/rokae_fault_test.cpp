@@ -18,6 +18,9 @@ public:
         hardware.state_update_running_ = false;
     }
     static void rollback(RokaeHardware& hardware) { hardware.rollbackStartupGroup(); }
+    static void installTool(RokaeHardware& hardware, std::unique_ptr<RokaeGripperInterface> tool) {
+        hardware.gripper_ = std::move(tool);
+    }
     static void fault(RokaeHardware& hardware) { hardware.latchRealtimeFault(); }
     static void start(RokaeHardware& hardware) { hardware.startRealtimeControl(); }
     static void stop(RokaeHardware& hardware) { hardware.stopRealtimeControl(); }
@@ -156,6 +159,72 @@ TEST_F(RokaeStartup, ShutdownAndErrorJoinFinishedStateWorkerAndPreventRestart) {
     EXPECT_EQ(hardware.write(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.002)), hardware_interface::return_type::ERROR);
     EXPECT_EQ(hardware.on_cleanup(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
     EXPECT_TRUE(RokaeHardwareTestPeer::faulted(hardware));
+}
+
+class ToolDynamicsProbe : public RokaeGripperInterface {
+public:
+    double torque = 1.0, velocity = 1.0, storage = 0.0;
+    int updates = 0;
+    std::string name = "gripper_joint";
+    bool initialize(rokae::xMateErProRobot&) override { return false; }
+    bool readStatusPeriodic() override { return false; }
+    bool writeCommandPeriodic() override { return false; }
+    bool hasGripper() const override { return true; }
+    const std::string& getJointName() const override { return name; }
+    bool isInitialized() const override { return false; }
+    double* getPositionPtr() override { return &storage; }
+    double* getVelocityPtr() override { return &storage; }
+    double* getEffortPtr() override { return &storage; }
+    double* getPositionCommandPtr() override { return &storage; }
+    void setToolDynamics(double t, double v) override { torque = t; velocity = v; ++updates; }
+    void exportStateInterfaces(std::vector<hardware_interface::StateInterface::ConstSharedPtr>&) override {}
+    void exportCommandInterfaces(std::vector<hardware_interface::CommandInterface::SharedPtr>&) override {}
+};
+
+TEST_F(RokaeStartup, DeclaresInstanceLocalToolParametersAndReadsHardwareDefaults) {
+    RokaeHardware left, right;
+    auto p = parameters("left");
+    p.hardware_info.hardware_parameters["tool_torque"] = "0.3";
+    p.hardware_info.hardware_parameters["tool_velocity"] = "0.4";
+    ASSERT_EQ(left.init(p), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(right.init(parameters("right", true)), hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_DOUBLE_EQ(left.get_node()->get_parameter("tool_torque").as_double(), 0.3);
+    EXPECT_DOUBLE_EQ(left.get_node()->get_parameter("tool_velocity").as_double(), 0.4);
+    EXPECT_DOUBLE_EQ(right.get_node()->get_parameter("tool_torque").as_double(), 1.0);
+    EXPECT_DOUBLE_EQ(right.get_node()->get_parameter("tool_velocity").as_double(), 1.0);
+    for (auto* hardware : {&left, &right}) {
+        for (const auto* old : {"left_tool_torque", "left_tool_velocity", "right_tool_torque", "right_tool_velocity"}) {
+            EXPECT_FALSE(hardware->get_node()->has_parameter(old));
+        }
+    }
+}
+
+TEST_F(RokaeStartup, ToolParameterUpdatesAffectOnlyOwningInstanceAndKeepOtherValue) {
+    RokaeHardware left, right;
+    ASSERT_EQ(left.init(parameters("left")), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(right.init(parameters("right", true)), hardware_interface::CallbackReturn::SUCCESS);
+    auto left_probe = std::make_unique<ToolDynamicsProbe>();
+    auto right_probe = std::make_unique<ToolDynamicsProbe>();
+    auto* l = left_probe.get();
+    auto* r = right_probe.get();
+    RokaeHardwareTestPeer::installTool(left, std::move(left_probe));
+    RokaeHardwareTestPeer::installTool(right, std::move(right_probe));
+    ASSERT_TRUE(right.get_node()->set_parameters_atomically({
+        rclcpp::Parameter("tool_torque", 0.3), rclcpp::Parameter("tool_velocity", 0.4)}).successful);
+    EXPECT_DOUBLE_EQ(r->torque, 0.3);
+    EXPECT_DOUBLE_EQ(r->velocity, 0.4);
+    EXPECT_EQ(l->updates, 0);
+    ASSERT_TRUE(right.get_node()->set_parameter(rclcpp::Parameter("tool_velocity", 1)).successful);
+    EXPECT_DOUBLE_EQ(r->torque, 0.3);
+    EXPECT_DOUBLE_EQ(r->velocity, 1.0);
+    EXPECT_EQ(l->updates, 0);
+    for (double invalid : {-0.1, 1.1, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        EXPECT_FALSE(right.get_node()->set_parameters_atomically({
+            rclcpp::Parameter("tool_torque", 0.8), rclcpp::Parameter("tool_velocity", invalid)}).successful);
+        EXPECT_DOUBLE_EQ(r->torque, 0.3);
+        EXPECT_DOUBLE_EQ(r->velocity, 1.0);
+    }
+    EXPECT_FALSE(right.get_node()->set_parameter(rclcpp::Parameter("tool_torque", "bad")).successful);
 }
 
 TEST_F(RokaeStartup, DestroyedSiblingIsRemovedBeforeAnotherActivationFails) {

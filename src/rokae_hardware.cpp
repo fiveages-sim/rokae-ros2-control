@@ -322,9 +322,9 @@ namespace rokae_ros2_control {
 
             const bool is_right_gripper = gripperJointIsRight(gripper_joint_name);
             const double tool_torque = clampToolParam(get_hardware_parameter(
-                is_right_gripper ? "right_tool_torque" : "left_tool_torque", 1.0));
+                "tool_torque", 1.0));
             const double tool_velocity = clampToolParam(get_hardware_parameter(
-                is_right_gripper ? "right_tool_velocity" : "left_tool_velocity", 1.0));
+                "tool_velocity", 1.0));
 
             if (gripper_type == "jodell" || gripper_type == "rg75" || gripper_type == "dual_rg75") {
                 gripper_ = std::make_unique<JodellGripper>(
@@ -636,29 +636,17 @@ namespace rokae_ros2_control {
                 return fallback;
             }
         };
-        const double left_tool_torque =
-            clampToolParam(read_hw_double("left_tool_torque", 1.0));
-        const double left_tool_velocity =
-            clampToolParam(read_hw_double("left_tool_velocity", 1.0));
-        const double right_tool_torque =
-            clampToolParam(read_hw_double("right_tool_torque", 1.0));
-        const double right_tool_velocity =
-            clampToolParam(read_hw_double("right_tool_velocity", 1.0));
+        const double tool_torque = clampToolParam(read_hw_double("tool_torque", 1.0));
+        const double tool_velocity = clampToolParam(read_hw_double("tool_velocity", 1.0));
 
         rcl_interfaces::msg::ParameterDescriptor tool_param_descriptor;
         tool_param_descriptor.dynamic_typing = true;
-        tool_param_descriptor.description = "Normalized tool torque/velocity in [0.0, 1.0]";
-        if (!get_node()->has_parameter("left_tool_torque")) {
-            get_node()->declare_parameter<double>("left_tool_torque", left_tool_torque, tool_param_descriptor);
+        tool_param_descriptor.description = "Normalized tool torque/velocity in [0.0, 1.0] for this arm";
+        if (!get_node()->has_parameter("tool_torque")) {
+            get_node()->declare_parameter<double>("tool_torque", tool_torque, tool_param_descriptor);
         }
-        if (!get_node()->has_parameter("left_tool_velocity")) {
-            get_node()->declare_parameter<double>("left_tool_velocity", left_tool_velocity, tool_param_descriptor);
-        }
-        if (!get_node()->has_parameter("right_tool_torque")) {
-            get_node()->declare_parameter<double>("right_tool_torque", right_tool_torque, tool_param_descriptor);
-        }
-        if (!get_node()->has_parameter("right_tool_velocity")) {
-            get_node()->declare_parameter<double>("right_tool_velocity", right_tool_velocity, tool_param_descriptor);
+        if (!get_node()->has_parameter("tool_velocity")) {
+            get_node()->declare_parameter<double>("tool_velocity", tool_velocity, tool_param_descriptor);
         }
 
         RCLCPP_INFO(get_node()->get_logger(),
@@ -694,10 +682,8 @@ namespace rokae_ros2_control {
             }
             return fallback;
         };
-        double next_left_tool_torque = read_tool_param("left_tool_torque", 1.0);
-        double next_left_tool_velocity = read_tool_param("left_tool_velocity", 1.0);
-        double next_right_tool_torque = read_tool_param("right_tool_torque", 1.0);
-        double next_right_tool_velocity = read_tool_param("right_tool_velocity", 1.0);
+        double next_tool_torque = read_tool_param("tool_torque", 1.0);
+        double next_tool_velocity = read_tool_param("tool_velocity", 1.0);
 
         for (const auto &param : params) {
             if (param.get_name() == "ctrl_mode") {
@@ -737,10 +723,7 @@ namespace rokae_ros2_control {
                 }
 
                 joint_impedance_changed = true;
-            } else if (param.get_name() == "left_tool_torque" ||
-                       param.get_name() == "left_tool_velocity" ||
-                       param.get_name() == "right_tool_torque" ||
-                       param.get_name() == "right_tool_velocity") {
+            } else if (param.get_name() == "tool_torque" || param.get_name() == "tool_velocity") {
                 if (param.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE &&
                     param.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER) {
                     result.successful = false;
@@ -752,20 +735,16 @@ namespace rokae_ros2_control {
                     (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
                         ? static_cast<double>(param.as_int())
                         : param.as_double();
-                if (value < 0.0 || value > 1.0) {
+                if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
                     result.successful = false;
                     result.reason = param.get_name() + " must be in [0.0, 1.0]";
                     return result;
                 }
 
-                if (param.get_name() == "left_tool_torque") {
-                    next_left_tool_torque = value;
-                } else if (param.get_name() == "left_tool_velocity") {
-                    next_left_tool_velocity = value;
-                } else if (param.get_name() == "right_tool_torque") {
-                    next_right_tool_torque = value;
+                if (param.get_name() == "tool_torque") {
+                    next_tool_torque = value;
                 } else {
-                    next_right_tool_velocity = value;
+                    next_tool_velocity = value;
                 }
                 tool_dynamics_changed = true;
             }
@@ -814,10 +793,7 @@ namespace rokae_ros2_control {
         }
 
         if (tool_dynamics_changed && gripper_) {
-            const bool is_right_gripper = gripperJointIsRight(gripper_->getJointName());
-            const double torque = is_right_gripper ? next_right_tool_torque : next_left_tool_torque;
-            const double velocity = is_right_gripper ? next_right_tool_velocity : next_left_tool_velocity;
-            gripper_->setToolDynamics(torque, velocity);
+            gripper_->setToolDynamics(next_tool_torque, next_tool_velocity);
             if (dynamic_cast<Erg32Gripper*>(gripper_.get()) == nullptr) gripper_->writeCommandPeriodic();
         }
 
