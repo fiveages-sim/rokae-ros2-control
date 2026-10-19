@@ -34,9 +34,17 @@ bool Erg32Gripper::initialize(rokae::xMateErProRobot& robot) {
 bool Erg32Gripper::readFeedback(erg32::Feedback& feedback) {
     std::array<uint16_t, 9> registers{};
     for (int offset = 0; offset < 9; offset += 3) {
-        std::vector<int> values(3);
+        std::vector<int> values(3, -1);
         if (!transfer_(0x03, 0x07D0 + offset, values) || values.size() != 3) return false;
-        for (int i = 0; i < 3; ++i) registers[offset + i] = static_cast<uint16_t>(values[i]);
+        // uint16 transfers must fill every element. Do not accept an unchanged
+        // output buffer as an all-zero device status when the bridge returns no data.
+        for (int i = 0; i < 3; ++i) {
+            if (values[i] < 0 || values[i] > 0xFFFF) {
+                RCLCPP_WARN(logger_, "ERG32 incomplete/invalid uint16 read at 0x%04X: value=%d", 0x07D0 + offset + i, values[i]);
+                return false;
+            }
+            registers[offset + i] = static_cast<uint16_t>(values[i]);
+        }
     }
     feedback = erg32::decode(registers);
     return true;
@@ -171,14 +179,29 @@ void Erg32Gripper::setToolDynamics(double torque, double velocity) {
 void Erg32Gripper::communicationLoop() {
     try {
         auto next_read = Clock::now();
+        bool allow_commands = true;
+        const auto invalid_state = [](const erg32::Feedback& f) {
+            return !f.ready() || f.turns != 0 || std::abs(f.position[0]) > erg32::pi + 1e-6;
+        };
+        const auto log_snapshot = [this](const char* label, const erg32::Feedback& f) {
+            const auto& r = f.registers;
+            RCLCPP_WARN(logger_,
+                "ERG32 %s: status rotate=0x%02X grip=0x%02X; faults rotate=0x%02X grip=0x%02X; "
+                "angle=%.1fdeg turns=%d; raw[07D0..07D8]=%04X %04X %04X %04X %04X %04X %04X %04X %04X",
+                label, f.status[0], f.status[1], f.fault[0], f.fault[1],
+                f.position[0] * 180.0 / erg32::pi, f.turns,
+                r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]);
+        };
         while (running_) {
             erg32::Packet packet;
             bool send = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait_until(lock, next_read, [this] { return !running_ || command_pending_; });
+                cv_.wait_until(lock, next_read, [this, &allow_commands] {
+                    return !running_ || (allow_commands && command_pending_);
+                });
                 if (!running_) break;
-                if (command_pending_) {
+                if (allow_commands && command_pending_) {
                     packet = pending_;
                     command_pending_ = false;
                     send = true;
@@ -189,12 +212,28 @@ void Erg32Gripper::communicationLoop() {
             }
             if (Clock::now() >= next_read) {
                 erg32::Feedback feedback;
-                if (readFeedback(feedback)) {
-                    if (!feedback.healthy() || !feedback.ready() || (feedback.turns != 0 || std::abs(feedback.position[0]) > erg32::pi + 1e-6)) {
-                        RCLCPP_ERROR(logger_, "ERG32 status rotate=0x%02X grip=0x%02X; faults rotate=0x%02X grip=0x%02X",
-                                     feedback.status[0], feedback.status[1], feedback.fault[0], feedback.fault[1]);
-                        fail("device fault, lost activation, or position out of range"); break;
+                bool valid_read = readFeedback(feedback);
+                // Fault bits are authoritative. For state/range anomalies, confirm
+                // with a fresh complete transaction before latching a terminal fault.
+                // No commands or state publication occur between these two reads.
+                if (valid_read && feedback.healthy() && invalid_state(feedback)) {
+                    log_snapshot("unconfirmed state; rereading", feedback);
+                    valid_read = readFeedback(feedback);
+                    allow_commands = false;
+                    if (valid_read && feedback.healthy() && !invalid_state(feedback)) {
+                        RCLCPP_WARN(logger_, "ERG32 anomalous snapshot discarded; fresh read confirms ready state");
                     }
+                }
+                if (valid_read) {
+                    if (!feedback.healthy() || invalid_state(feedback)) {
+                        log_snapshot("confirmed invalid state", feedback);
+                        if (!feedback.healthy()) fail("device fault bits set");
+                        else if (!feedback.ready()) fail("activation lost on consecutive full reads");
+                        else if (feedback.turns != 0) fail("nonzero turn count confirmed in single-turn mode");
+                        else fail("rotation outside +/-180 degrees confirmed");
+                        break;
+                    }
+                    allow_commands = true;
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (feedback.status != feedback_.status) {
                         RCLCPP_INFO(logger_, "ERG32 object state rotate=%u grip=%u dropped=%d (voltage=%uV temperature=%uC)",

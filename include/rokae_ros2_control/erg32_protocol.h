@@ -50,6 +50,7 @@ inline Packet encode(const std::array<double, 2>& position, double torque, doubl
 }
 
 struct Feedback {
+    std::array<uint16_t, 9> registers{};
     std::array<double, 2> position{};
     std::array<uint8_t, 2> status{}, fault{}, object{}, raw_velocity{}, raw_current{};
     int turns = 0;
@@ -61,6 +62,7 @@ struct Feedback {
 
 inline Feedback decode(const std::array<uint16_t, 9>& r) {
     Feedback f;
+    f.registers = r;
     f.status = {static_cast<uint8_t>(r[1]), static_cast<uint8_t>(r[0])};
     f.fault = {static_cast<uint8_t>(r[1] >> 8), static_cast<uint8_t>(r[0] >> 8)};
     for (size_t i = 0; i < 2; ++i) f.object[i] = (f.status[i] >> 5) & 7;

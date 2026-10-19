@@ -248,4 +248,103 @@ TEST(Erg32Worker, PublishesOnlyThroughControlThreadSnapshotCopy) {
     EXPECT_NEAR(g.getPositionPtr()[0], erg32::pi / 2, 1e-12);
     g.stop();
 }
+TEST(Erg32Lifecycle, UnfilledBridgeOutputDoesNotBecomeZeroStatus) {
+    Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
+    Erg32TestPeer::transport(g, [](int function, int, std::vector<int>&) {
+        EXPECT_EQ(function, 3);
+        return true; // RPC reported success, but supplied no register values.
+    });
+    EXPECT_FALSE(Erg32TestPeer::initialize(g));
+    EXPECT_FALSE(g.isInitialized());
+}
+
+TEST(Erg32Worker, OneBadStatusSnapshotIsDiscardedAfterFreshReadyRead) {
+    Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
+    int snapshots = 0;
+    Erg32TestPeer::transport(g, [&](int function, int address, std::vector<int>& data) {
+        if (function == 3) {
+            std::fill(data.begin(), data.end(), 0);
+            if (address == 0x07D0) {
+                ++snapshots;
+                data[0] = snapshots == 2 ? 0x01 : 0x18;
+                data[1] = snapshots == 2 ? 0x00 : 0x18;
+            }
+            if (address == 0x07D3 && snapshots >= 3) data[1] = 90;
+        }
+        return true;
+    });
+    ASSERT_TRUE(Erg32TestPeer::initialize(g));
+    EXPECT_TRUE(Erg32TestPeer::waitPosition(g, erg32::pi / 2));
+    EXPECT_TRUE(g.readStatusPeriodic());
+    EXPECT_NEAR(g.getPositionPtr()[0], erg32::pi / 2, 1e-12);
+    g.stop();
+    EXPECT_GE(snapshots, 3);
+}
+
+TEST(Erg32Worker, ConfirmedActivationLossStillStopsWithoutReactivation) {
+    Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
+    int snapshots = 0;
+    bool unexpected_enable = false;
+    Erg32TestPeer::transport(g, [&](int function, int address, std::vector<int>& data) {
+        if (function == 3) {
+            std::fill(data.begin(), data.end(), 0);
+            if (address == 0x07D0) {
+                ++snapshots;
+                data[0] = snapshots == 1 ? 0x18 : 0x01;
+                data[1] = snapshots == 1 ? 0x18 : 0x00;
+            }
+        } else if (address == 0x03E8 && snapshots > 1 && data[0] == 1) {
+            unexpected_enable = true;
+        }
+        return true;
+    });
+    ASSERT_TRUE(Erg32TestPeer::initialize(g));
+    EXPECT_TRUE(Erg32TestPeer::waitFault(g));
+    g.stop();
+    EXPECT_EQ(snapshots, 3);
+    EXPECT_FALSE(unexpected_enable);
+}
+
+TEST(Erg32Worker, ActualDeviceFaultBitsStopWithoutWaitingForConfirmation) {
+    Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
+    int snapshots = 0;
+    Erg32TestPeer::transport(g, [&](int function, int address, std::vector<int>& data) {
+        if (function == 3) {
+            std::fill(data.begin(), data.end(), 0);
+            if (address == 0x07D0) {
+                ++snapshots;
+                data[0] = snapshots == 1 ? 0x18 : 0x0818;
+                data[1] = 0x18;
+            }
+        }
+        return true;
+    });
+    ASSERT_TRUE(Erg32TestPeer::initialize(g));
+    EXPECT_TRUE(Erg32TestPeer::waitFault(g));
+    g.stop();
+    EXPECT_EQ(snapshots, 2);
+}
+
+TEST(Erg32Worker, ConfirmedRangeAndTurnCountViolationsStillStop) {
+    for (bool turns : {false, true}) {
+        Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
+        int snapshots = 0;
+        Erg32TestPeer::transport(g, [&](int function, int address, std::vector<int>& data) {
+            if (function == 3) {
+                std::fill(data.begin(), data.end(), 0);
+                if (address == 0x07D0) {
+                    ++snapshots;
+                    data[0] = 0x18; data[1] = 0x18;
+                }
+                if (snapshots > 1 && !turns && address == 0x07D3) data[1] = 181;
+                if (snapshots > 1 && turns && address == 0x07D6) data[0] = 0x0101;
+            }
+            return true;
+        });
+        ASSERT_TRUE(Erg32TestPeer::initialize(g));
+        EXPECT_TRUE(Erg32TestPeer::waitFault(g));
+        g.stop();
+        EXPECT_EQ(snapshots, 3);
+    }
+}
 } // namespace rokae_ros2_control
