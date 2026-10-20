@@ -1,4 +1,6 @@
 #include "rokae_ros2_control/rokae_hardware.h"
+#include "rokae_ros2_control/ag2f90d_gripper.h"
+#include "rokae_ros2_control/changingtek_model.h"
 
 #include <gtest/gtest.h>
 
@@ -7,6 +9,9 @@ namespace rokae_ros2_control {
 // Exercise the fault path without creating a robot connection or issuing SDK commands.
 class RokaeHardwareTestPeer {
 public:
+    static Ag2f90dGripper* changingtekTool(RokaeHardware& hardware) {
+        return dynamic_cast<Ag2f90dGripper*>(hardware.gripper_.get());
+    }
     static bool connected(const RokaeHardware& hardware) { return hardware.arm_robot_ != nullptr; }
     static bool receiving(const RokaeHardware& hardware) { return hardware.state_receive_started_; }
     static bool active(const RokaeHardware& hardware) { return hardware.hardware_active_; }
@@ -225,6 +230,105 @@ TEST_F(RokaeStartup, ToolParameterUpdatesAffectOnlyOwningInstanceAndKeepOtherVal
         EXPECT_DOUBLE_EQ(r->velocity, 1.0);
     }
     EXPECT_FALSE(right.get_node()->set_parameter(rclcpp::Parameter("tool_torque", "bad")).successful);
+}
+
+class ChangingtekGripperTestPeer {
+public:
+    static const Ag2f90dGripper::Config& config(const Ag2f90dGripper& g) { return g.config_; }
+    static int torque(const Ag2f90dGripper& g) { return g.command_torque_; }
+    static int velocity(const Ag2f90dGripper& g) { return g.command_velocity_; }
+    static int encode(const Ag2f90dGripper& g, double p) { return g.normalizedToRegister(p); }
+    static double decode(const Ag2f90dGripper& g, int p) { return g.registerToNormalized(p); }
+    static bool worker(const Ag2f90dGripper& g) { return g.command_thread_.joinable(); }
+    static void finishedWorker(Ag2f90dGripper& g) {
+        g.command_thread_ = std::thread([] {});
+        g.command_queue_.push({123});
+        g.initialized_ = true;
+    }
+    static bool emptyQueue(const Ag2f90dGripper& g) { return g.command_queue_.empty(); }
+};
+
+TEST(ChangingtekModels, PreservesAliasesAndRejectsUnknownTypes) {
+    for (const auto* alias : {"ag2f90_c", "ag2f90c", "ag2f90", "changingtek90c", "AG2F90_C"}) {
+        const auto m = changingtek::modelFor(alias);
+        ASSERT_TRUE(m);
+        EXPECT_STREQ(m->name, "AG2F90C");
+    }
+    for (const auto* alias : {"ag2f90_d", "ag2f90d", "changingtek90d"}) {
+        const auto m = changingtek::modelFor(alias);
+        ASSERT_TRUE(m);
+        EXPECT_STREQ(m->name, "AG2F90D");
+    }
+    EXPECT_FALSE(changingtek::modelFor("unknown"));
+    EXPECT_FALSE(changingtek::modelFor(""));
+}
+
+TEST_F(RokaeStartup, ChangingtekFactorySelectsAllFourModelRanges) {
+    struct Expected { const char* type; int close; int feedback; int dynamics; };
+    for (const auto& expected : {Expected{"ag2f90_c", 9000, 0x060D, 255},
+                               Expected{"ag2f90_d", 9000, 0x0418, 255},
+                               Expected{"AG2F120S", 12000, 0x060D, 100},
+                               Expected{"ag2f120s_d", 1000, 0x0418, 100}}) {
+        for (const auto* side : {"left", "right"}) {
+            RokaeHardware hardware;
+            auto p = parameters(side);
+            p.hardware_info.hardware_parameters["gripper_type"] = expected.type;
+            p.hardware_info.hardware_parameters["tool_torque"] = "0.5";
+            p.hardware_info.hardware_parameters["tool_velocity"] = "0.5";
+            hardware_interface::ComponentInfo joint;
+            joint.name = std::string(side) + "_gripper_joint";
+            p.hardware_info.joints.push_back(joint);
+            ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+            auto* tool = RokaeHardwareTestPeer::changingtekTool(hardware);
+            ASSERT_NE(tool, nullptr);
+            const auto& config = ChangingtekGripperTestPeer::config(*tool);
+            EXPECT_EQ(config.close_pos, expected.close);
+            EXPECT_EQ(config.feedback_reg, expected.feedback);
+            EXPECT_EQ(config.max_torque, expected.dynamics);
+            EXPECT_EQ(config.max_velocity, expected.dynamics);
+            EXPECT_EQ(ChangingtekGripperTestPeer::torque(*tool), static_cast<int>(expected.dynamics * 0.5));
+            EXPECT_EQ(ChangingtekGripperTestPeer::velocity(*tool), std::lround(expected.dynamics * 0.5));
+            EXPECT_EQ(ChangingtekGripperTestPeer::encode(*tool, 0.0), expected.close);
+            EXPECT_EQ(ChangingtekGripperTestPeer::encode(*tool, 1.0), 0);
+            EXPECT_EQ(ChangingtekGripperTestPeer::encode(*tool, 0.5), expected.close / 2);
+            EXPECT_DOUBLE_EQ(ChangingtekGripperTestPeer::decode(*tool, 0), 1.0);
+            EXPECT_DOUBLE_EQ(ChangingtekGripperTestPeer::decode(*tool, expected.close), 0.0);
+            ASSERT_TRUE(hardware.get_node()->set_parameters_atomically({
+                rclcpp::Parameter("tool_torque", 1.0), rclcpp::Parameter("tool_velocity", 1.0)}).successful);
+            EXPECT_EQ(ChangingtekGripperTestPeer::torque(*tool), expected.dynamics);
+            EXPECT_EQ(ChangingtekGripperTestPeer::velocity(*tool), expected.dynamics);
+            EXPECT_FALSE(ChangingtekGripperTestPeer::worker(*tool));
+            EXPECT_FALSE(RokaeHardwareTestPeer::connected(hardware));
+        }
+    }
+}
+
+TEST_F(RokaeStartup, ChangingtekModelAllowsRegisterOverrides) {
+    RokaeHardware hardware;
+    auto p = parameters("override");
+    p.hardware_info.hardware_parameters["gripper_type"] = "ag2f120s";
+    p.hardware_info.hardware_parameters["gripper_close_pos"] = "11000";
+    p.hardware_info.hardware_parameters["gripper_feedback_reg"] = "1500";
+    hardware_interface::ComponentInfo joint;
+    joint.name = "right_gripper_joint";
+    p.hardware_info.joints.push_back(joint);
+    ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+    auto* tool = RokaeHardwareTestPeer::changingtekTool(hardware);
+    ASSERT_NE(tool, nullptr);
+    EXPECT_EQ(ChangingtekGripperTestPeer::config(*tool).close_pos, 11000);
+    EXPECT_EQ(ChangingtekGripperTestPeer::config(*tool).feedback_reg, 1500);
+    EXPECT_EQ(ChangingtekGripperTestPeer::config(*tool).max_torque, 100);
+}
+
+TEST(ChangingtekLifecycle, StopJoinsWorkerAndClearsPendingCommands) {
+    Ag2f90dGripper tool(rclcpp::get_logger("test"), std::make_shared<rclcpp::Clock>(), "gripper_joint", {});
+    EXPECT_FALSE(ChangingtekGripperTestPeer::worker(tool));
+    ChangingtekGripperTestPeer::finishedWorker(tool);
+    tool.stop();
+    EXPECT_FALSE(tool.isInitialized());
+    EXPECT_FALSE(ChangingtekGripperTestPeer::worker(tool));
+    EXPECT_TRUE(ChangingtekGripperTestPeer::emptyQueue(tool));
+    tool.stop();
 }
 
 TEST_F(RokaeStartup, DestroyedSiblingIsRemovedBeforeAnotherActivationFails) {

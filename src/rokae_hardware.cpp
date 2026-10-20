@@ -1,5 +1,6 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
+#include "rokae_ros2_control/changingtek_model.h"
 #include "rokae_ros2_control/jodell_gripper.h"
 #include "rokae_ros2_control/erg32_gripper.h"
 #include "rokae_ros2_control/linkerhand.h"
@@ -77,20 +78,6 @@ namespace rokae_ros2_control {
             }
 
             return "";
-        }
-
-        bool isAg2f90CType(const std::string &gripper_type) {
-            return gripper_type == "ag2f90_c" || gripper_type == "ag2f90c" ||
-                   gripper_type == "ag2f90" || gripper_type == "changingtek90c";
-        }
-
-        bool isAg2f90DType(const std::string &gripper_type) {
-            return gripper_type == "ag2f90_d" || gripper_type == "ag2f90d" ||
-                   gripper_type == "changingtek90d";
-        }
-
-        bool isAg2f90Type(const std::string &gripper_type) {
-            return isAg2f90CType(gripper_type) || isAg2f90DType(gripper_type);
         }
 
         bool gripperJointIsRight(const std::string &joint_name) {
@@ -387,10 +374,15 @@ namespace rokae_ros2_control {
                                  gripper_type.c_str(), e.what());
                     return hardware_interface::CallbackReturn::ERROR;
                 }
-            } else if (isAg2f90Type(gripper_type)) {
+            } else if (const auto model = changingtek::modelFor(gripper_type)) {
                 Ag2f90dGripper::Config config;
+                config.model_name = model->name;
+                config.close_pos = model->close_position;
+                config.feedback_reg = model->feedback_register;
+                config.max_velocity = model->max_velocity;
+                config.max_torque = model->max_torque;
                 config.slave_id = get_hardware_parameter("gripper_slave_id", 1);
-                config.close_pos = get_hardware_parameter("gripper_close_pos", 9000);
+                config.close_pos = get_hardware_parameter("gripper_close_pos", config.close_pos);
                 config.max_opening_distance =
                     get_hardware_parameter("gripper_max_opening_distance", 0.09);
                 config.configure_xpanel =
@@ -407,13 +399,6 @@ namespace rokae_ros2_control {
                     get_hardware_parameter("gripper_default_acceleration", config.default_acceleration);
                 config.default_deceleration =
                     get_hardware_parameter("gripper_default_deceleration", config.default_deceleration);
-                if (isAg2f90CType(gripper_type)) {
-                    config.model_name = "AG2F90C";
-                    config.feedback_reg = Ag2f90dGripper::FEEDBACK_REG_C;
-                } else {
-                    config.model_name = "AG2F90D";
-                    config.feedback_reg = Ag2f90dGripper::FEEDBACK_REG_D;
-                }
                 config.feedback_reg =
                     get_hardware_parameter("gripper_feedback_reg", config.feedback_reg);
                 gripper_ = std::make_unique<Ag2f90dGripper>(

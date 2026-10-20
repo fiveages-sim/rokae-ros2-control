@@ -17,13 +17,20 @@ Ag2f90dGripper::Ag2f90dGripper(
       clock_(std::move(clock)),
       joint_name_(std::move(joint_name)),
       config_(config) {
-    config_.close_pos = std::max(config_.close_pos, OPEN_POS);
+    if (config_.close_pos <= 0 || config_.close_pos > 65535 ||
+        config_.max_velocity <= 0 || config_.max_velocity > 65535 ||
+        config_.max_torque <= 0 || config_.max_torque > 65535) {
+        throw std::invalid_argument("Invalid ChangingTek register range");
+    }
     config_.max_opening_distance = std::max(config_.max_opening_distance, 0.001);
     config_.read_interval_ms = std::max(config_.read_interval_ms, 50);
+    if (!std::isfinite(config_.normalized_torque) || !std::isfinite(config_.normalized_velocity)) {
+        throw std::invalid_argument("Non-finite ChangingTek dynamics");
+    }
     config_.normalized_torque = std::clamp(config_.normalized_torque, 0.0, 1.0);
     config_.normalized_velocity = std::clamp(config_.normalized_velocity, 0.0, 1.0);
-    command_torque_ = static_cast<int>(config_.normalized_torque * 255.0);
-    command_velocity_ = static_cast<int>(std::round(config_.normalized_velocity * 255.0));
+    command_torque_ = static_cast<int>(config_.normalized_torque * config_.max_torque);
+    command_velocity_ = static_cast<int>(std::round(config_.normalized_velocity * config_.max_velocity));
     if (config_.model_name.empty()) {
         config_.model_name = "AG2F90D";
     }
@@ -38,11 +45,11 @@ Ag2f90dGripper::Ag2f90dGripper(
                 config_.feedback_reg,
                 config_.configure_xpanel ? "true" : "false");
 
-    thread_running_ = true;
-    command_thread_ = std::thread(&Ag2f90dGripper::commandThreadFunction, this);
 }
 
-Ag2f90dGripper::~Ag2f90dGripper() {
+Ag2f90dGripper::~Ag2f90dGripper() { stop(); }
+
+void Ag2f90dGripper::stop() {
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         thread_running_ = false;
@@ -52,14 +59,23 @@ Ag2f90dGripper::~Ag2f90dGripper() {
     if (command_thread_.joinable()) {
         command_thread_.join();
     }
+    initialized_ = false;
+    robot_ptr_ = nullptr;
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    while (!command_queue_.empty()) command_queue_.pop();
+    acceleration_set_ = deceleration_set_ = false;
+    cached_torque_reg_ = cached_velocity_reg_ = -1;
 }
 
 void Ag2f90dGripper::setToolDynamics(double normalized_torque, double normalized_velocity) {
+    if (!std::isfinite(normalized_torque) || !std::isfinite(normalized_velocity)) {
+        throw std::invalid_argument("Non-finite ChangingTek dynamics");
+    }
     std::lock_guard<std::mutex> lock(dynamics_mutex_);
     config_.normalized_torque = std::clamp(normalized_torque, 0.0, 1.0);
     config_.normalized_velocity = std::clamp(normalized_velocity, 0.0, 1.0);
-    const int next_torque = static_cast<int>(config_.normalized_torque * 255.0);
-    const int next_velocity = static_cast<int>(std::round(config_.normalized_velocity * 255.0));
+    const int next_torque = static_cast<int>(config_.normalized_torque * config_.max_torque);
+    const int next_velocity = static_cast<int>(std::round(config_.normalized_velocity * config_.max_velocity));
     if (next_torque == command_torque_ && next_velocity == command_velocity_) {
         return;
     }
@@ -70,6 +86,7 @@ void Ag2f90dGripper::setToolDynamics(double normalized_torque, double normalized
 }
 
 bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
+    stop();
     robot_ptr_ = &robot;
 
     if (config_.configure_xpanel) {
@@ -110,6 +127,14 @@ bool Ag2f90dGripper::initialize(rokae::xMateErProRobot& robot) {
     }
 
     initialized_ = true;
+    thread_running_ = true;
+    try {
+        command_thread_ = std::thread(&Ag2f90dGripper::commandThreadFunction, this);
+    } catch (const std::exception& e) {
+        stop();
+        RCLCPP_ERROR(logger_, "Failed to start %s worker: %s", config_.model_name.c_str(), e.what());
+        return false;
+    }
     return true;
 }
 

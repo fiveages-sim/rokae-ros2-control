@@ -19,6 +19,8 @@ public:
     struct Config {
         int slave_id = 0x01;
         int close_pos = 9000;
+        int max_velocity = 255;
+        int max_torque = 255;
         double max_opening_distance = 0.09;
         bool configure_xpanel = false;
         int read_interval_ms = 500;
@@ -42,6 +44,7 @@ public:
     ~Ag2f90dGripper() override;
 
     bool initialize(rokae::xMateErProRobot& robot) override;
+    void stop() override;
     bool readStatusPeriodic() override;
     bool writeCommandPeriodic() override;
 
@@ -64,6 +67,7 @@ public:
     static constexpr int FEEDBACK_REG_C = 0x060D;
 
 private:
+    friend class ChangingtekGripperTestPeer;
     struct Command {
         int pos_set;
     };

@@ -216,3 +216,30 @@ parameter names. Controller topics, actions, joint names, and position commands
 are unchanged. The inspected `fa-py-libraries/ros2_robot_interface` checkout does
 not hard-code the removed parameters; its generic parameter-setting API still
 requires callers to supply the new names when addressing a Rokae hardware node.
+
+
+## ChangingTek 120S / 120S-D through Rokae RS485
+
+`gripper_type=ag2f120s` and `ag2f120s_d` use the same ChangingTek transaction
+implementation as 90C/90D. The driver selects model defaults before applying
+explicit register overrides:
+
+| Type | Closed position raw value | Position feedback | Speed / torque full scale |
+| --- | ---: | --- | ---: |
+| `ag2f90_c` | 9000 | `0x060D` | 255 |
+| `ag2f90_d` | 9000 | `0x0418` | 255 |
+| `ag2f120s` | 12000 | `0x060D` | 100 |
+| `ag2f120s_d` | 1000 | `0x0418` | 100 |
+
+Both initial settings and runtime `tool_velocity` / `tool_torque` updates use
+the selected model's full scale. Position command/state remain normalized:
+0.0 closed, 1.0 open. `gripper_max_opening_distance` does not scale these ROS
+values. Existing Xacro/model/controller selection can be used directly.
+`gripper_close_pos`, `gripper_feedback_reg`, and existing dynamics register
+address overrides are still applied after selecting the model.
+
+These defaults match the existing Marvin model definitions; 120S/120S-D support
+has been checked with configuration/conversion tests, not verified on hardware.
+Confirm initialization, acceleration/deceleration values, feedback word order,
+and physical motion with the actual device before production use. No iNexus or
+USB-Modbus 120S driver is added by this change.
