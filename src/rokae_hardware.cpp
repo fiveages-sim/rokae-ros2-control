@@ -694,6 +694,12 @@ namespace rokae_ros2_control {
 
                 ctrl_mode_changed = next_ctrl_mode != ctrl_mode_;
             } else if (param.get_name() == "joint_impedance") {
+                if (use_impedance_control_) {
+                    result.successful = false;
+                    result.reason = "joint_impedance cannot be changed in JOINT_IMPEDANCE mode; "
+                                    "switch to POSITION first";
+                    return result;
+                }
                 if (param.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
                     result.successful = false;
                     result.reason = "joint_impedance must be a double array";
@@ -743,8 +749,7 @@ namespace rokae_ros2_control {
         }
 
         const bool switching_to_position = ctrl_mode_changed && next_ctrl_mode == "POSITION";
-        const bool restart_rt_move =
-            rt_control_running_ && (ctrl_mode_changed || (joint_impedance_changed && use_impedance_control_));
+        const bool restart_rt_move = rt_control_running_ && ctrl_mode_changed;
         std::unique_lock<std::mutex> control_mode_lock(control_mode_mutex_, std::defer_lock);
         if (restart_rt_move) {
             control_mode_lock.lock();

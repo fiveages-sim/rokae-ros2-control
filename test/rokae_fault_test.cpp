@@ -59,6 +59,8 @@ public:
     static void start(RokaeHardware& hardware) { hardware.startRealtimeControl(); }
     static void stop(RokaeHardware& hardware) { hardware.stopRealtimeControl(); }
     static bool running(const RokaeHardware& hardware) { return hardware.rt_control_running_; }
+    static void setRunning(RokaeHardware& hardware, bool running) { hardware.rt_control_running_ = running; }
+    static const std::array<double, 7>& impedance(const RokaeHardware& hardware) { return hardware.joint_impedance_; }
     static bool joinable(const RokaeHardware& hardware) { return hardware.rt_control_thread_.joinable(); }
     static bool restartRequested(const RokaeHardware& hardware) { return hardware.rt_move_restart_requested_; }
     static rcl_interfaces::msg::SetParametersResult changeMode(RokaeHardware& hardware) {
@@ -254,6 +256,54 @@ TEST_F(RokaeStartup, ModeCanBeConfiguredBeforeActivationWithoutConnecting) {
     EXPECT_TRUE(RokaeHardwareTestPeer::changeMode(hardware).successful);
     EXPECT_FALSE(RokaeHardwareTestPeer::connected(hardware));
     EXPECT_FALSE(RokaeHardwareTestPeer::active(hardware));
+}
+
+TEST_F(RokaeStartup, ImpedanceModeRejectsStiffnessUpdatesBeforeStoppingRealtimeMove) {
+    for (const bool running : {false, true}) {
+        RokaeHardware hardware;
+        auto p = parameters("stiffness_locked");
+        p.hardware_info.hardware_parameters["ctrl_mode"] = "JOINT_IMPEDANCE";
+        ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+        RokaeHardwareTestPeer::setRunning(hardware, running);
+        const auto previous = RokaeHardwareTestPeer::impedance(hardware);
+        const auto previous_parameter = hardware.get_node()->get_parameter("joint_impedance").as_double_array();
+        const std::vector<double> stiffness(7, 100.0);
+        // Even a batch switching to POSITION must not bypass the current-mode guard.
+        for (const auto& batch : {
+                std::vector<rclcpp::Parameter>{rclcpp::Parameter("joint_impedance", stiffness)},
+                std::vector<rclcpp::Parameter>{rclcpp::Parameter("ctrl_mode", "POSITION"),
+                                               rclcpp::Parameter("joint_impedance", stiffness)},
+                std::vector<rclcpp::Parameter>{rclcpp::Parameter("joint_impedance", stiffness),
+                                               rclcpp::Parameter("ctrl_mode", "POSITION")}}) {
+            const auto result = hardware.get_node()->set_parameters_atomically(batch);
+            EXPECT_FALSE(result.successful);
+            EXPECT_NE(result.reason.find("switch to POSITION first"), std::string::npos);
+            EXPECT_EQ(RokaeHardwareTestPeer::impedance(hardware), previous);
+            EXPECT_EQ(hardware.get_node()->get_parameter("joint_impedance").as_double_array(), previous_parameter);
+            EXPECT_EQ(hardware.get_node()->get_parameter("ctrl_mode").as_string(), "JOINT_IMPEDANCE");
+            EXPECT_EQ(RokaeHardwareTestPeer::running(hardware), running);
+            EXPECT_FALSE(RokaeHardwareTestPeer::restartRequested(hardware));
+            EXPECT_FALSE(RokaeHardwareTestPeer::faulted(hardware));
+        }
+        RokaeHardwareTestPeer::setRunning(hardware, false);
+    }
+}
+
+TEST_F(RokaeStartup, StiffnessCanBeChangedAfterSwitchingToPosition) {
+    RokaeHardware hardware;
+    auto p = parameters("stiffness_configurable");
+    p.hardware_info.hardware_parameters["ctrl_mode"] = "JOINT_IMPEDANCE";
+    ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_TRUE(hardware.get_node()->set_parameters_atomically({
+        rclcpp::Parameter("ctrl_mode", "POSITION")}).successful);
+    const std::vector<double> stiffness(7, 100.0);
+    ASSERT_TRUE(hardware.get_node()->set_parameters_atomically({
+        rclcpp::Parameter("joint_impedance", stiffness)}).successful);
+    EXPECT_EQ(hardware.get_node()->get_parameter("joint_impedance").as_double_array(), stiffness);
+    for (const double value : RokaeHardwareTestPeer::impedance(hardware)) EXPECT_DOUBLE_EQ(value, 100.0);
+    EXPECT_FALSE(RokaeHardwareTestPeer::restartRequested(hardware));
+    ASSERT_TRUE(hardware.get_node()->set_parameters_atomically({
+        rclcpp::Parameter("ctrl_mode", "JOINT_IMPEDANCE")}).successful);
 }
 
 TEST_F(RokaeStartup, FailedRightActivationRollsBackLoadedAndActiveSiblings) {
