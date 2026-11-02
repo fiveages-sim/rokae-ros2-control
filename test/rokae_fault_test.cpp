@@ -3,41 +3,12 @@
 #include "rokae_ros2_control/changingtek_model.h"
 
 #include <gtest/gtest.h>
-#include <algorithm>
-#include <cmath>
-#include <limits>
-#include <stdexcept>
 
 namespace rokae_ros2_control {
 
 // Exercise the fault path without creating a robot connection or issuing SDK commands.
 class RokaeHardwareTestPeer {
 public:
-    static void prepareLimits(RokaeHardware& hardware, const std::string& xml) {
-        hardware.arm_joint_count_ = 1;
-        hardware.joint_names_ = {"joint"};
-        hardware.configureArmPositionLimits(xml);
-        hardware.command_filters_.resize(1);
-        hardware.target_joint_position_commands_ = {0.0};
-    }
-    static double command(RokaeHardware& hardware, double target, bool filtered = false) {
-        hardware.use_double_s_filter_ = filtered;
-        hardware.target_joint_position_commands_[0] = target;
-        return hardware.nextArmPositionCommand(0);
-    }
-    static void filterState(RokaeHardware& hardware, double q, double qd, double qdd) {
-        hardware.command_filters_[0].reset(q, qd, qdd);
-    }
-    static double filterVelocity(const RokaeHardware& hardware) { return hardware.command_filters_[0].qd; }
-    static double filterAcceleration(const RokaeHardware& hardware) { return hardware.command_filters_[0].qdd; }
-    static void setArmCommands(RokaeHardware& hardware, double position) {
-        std::fill(hardware.joint_position_commands_.begin(), hardware.joint_position_commands_.end(), position);
-    }
-    static void setFeedback(RokaeHardware& hardware, double position) {
-        std::fill(hardware.joint_positions_.begin(), hardware.joint_positions_.end(), position);
-    }
-    static const std::vector<double>& feedback(const RokaeHardware& hardware) { return hardware.joint_positions_; }
-    static const std::vector<double>& targets(const RokaeHardware& hardware) { return hardware.target_joint_position_commands_; }
     static Ag2f90dGripper* changingtekTool(RokaeHardware& hardware) {
         return dynamic_cast<Ag2f90dGripper*>(hardware.gripper_.get());
     }
@@ -126,15 +97,6 @@ protected:
             joint.name = name + "_joint" + std::to_string(i);
             p.hardware_info.joints.push_back(joint);
         }
-        p.hardware_info.original_xml = "<robot name='test'><link name='base'/>";
-        for (int i = 0; i < 7; ++i) {
-            const auto link = "link" + std::to_string(i);
-            const auto parent = i == 0 ? "base" : "link" + std::to_string(i - 1);
-            p.hardware_info.original_xml += "<link name='" + link + "'/><joint name='" +
-                p.hardware_info.joints[i].name + "' type='revolute'><parent link='" + parent +
-                "'/><child link='" + link + "'/><limit lower='-1' upper='1' effort='10' velocity='2'/></joint>";
-        }
-        p.hardware_info.original_xml += "</robot>";
         if (erg32) {
             p.hardware_info.hardware_parameters["gripper_type"] = "erg32";
             for (const auto* name : {"right_hand_rotate_joint", "right_hand_gripper_joint"}) {
@@ -146,90 +108,6 @@ protected:
         return p;
     }
 };
-
-static const std::string kPositionLimitsUrdf =
-    "<robot name='test'><link name='base'/><link name='tip'/>"
-    "<joint name='joint' type='revolute'><parent link='base'/><child link='tip'/>"
-    "<limit lower='-2' upper='2' effort='10' velocity='2'/>"
-    "<safety_controller soft_lower_limit='-1' soft_upper_limit='1' k_velocity='1'/></joint></robot>";
-
-TEST(RokaePositionLimits, UsesUrdfSoftLimitsAndAcceptsBoundaryCommands) {
-    RokaeHardware hardware;
-    RokaeHardwareTestPeer::prepareLimits(hardware, kPositionLimitsUrdf);
-    for (const double target : {-10.0, -1.0, -0.5, 0.0, 0.5, 1.0, 10.0}) {
-        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::command(hardware, target), std::clamp(target, -1.0, 1.0));
-        EXPECT_FALSE(RokaeHardwareTestPeer::faulted(hardware));
-    }
-    for (const double invalid : {std::numeric_limits<double>::quiet_NaN(),
-                                 std::numeric_limits<double>::infinity(),
-                                 -std::numeric_limits<double>::infinity()}) {
-        EXPECT_THROW(RokaeHardwareTestPeer::command(hardware, invalid), std::runtime_error);
-    }
-}
-
-TEST(RokaePositionLimits, FilterOvershootResetsStateAndCanMoveBackInward) {
-    RokaeHardware hardware;
-    RokaeHardwareTestPeer::prepareLimits(hardware, kPositionLimitsUrdf);
-    for (const double sign : {-1.0, 1.0}) {
-        RokaeHardwareTestPeer::filterState(hardware, sign, sign * 2.0, sign * 3.0);
-        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::command(hardware, sign * 10.0, true), sign);
-        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::filterVelocity(hardware), 0.0);
-        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::filterAcceleration(hardware), 0.0);
-        double output = sign;
-        for (int cycle = 0; cycle < 1000; ++cycle) {
-            output = RokaeHardwareTestPeer::command(hardware, 0.0, true);
-            ASSERT_TRUE(std::isfinite(output));
-            ASSERT_GE(output, -1.0);
-            ASSERT_LE(output, 1.0);
-        }
-        EXPECT_LT(std::abs(output), 1.0);
-    }
-}
-
-TEST(RokaePositionLimits, FallsBackToUrdfJointLimitsWithoutSafetyController) {
-    RokaeHardware hardware;
-    auto xml = kPositionLimitsUrdf;
-    const auto start = xml.find("<safety_controller");
-    xml.erase(start, xml.find("/>", start) + 2 - start);
-    RokaeHardwareTestPeer::prepareLimits(hardware, xml);
-    EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::command(hardware, 10.0), 2.0);
-    EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::command(hardware, -10.0), -2.0);
-}
-
-TEST(RokaePositionLimits, RejectsMissingAndInvertedLimits) {
-    RokaeHardware hardware;
-    auto xml = kPositionLimitsUrdf;
-    const auto start = xml.find("<limit ");
-    xml.erase(start, xml.find("/>", start) + 2 - start);
-    EXPECT_THROW(RokaeHardwareTestPeer::prepareLimits(hardware, xml), std::runtime_error);
-    xml = kPositionLimitsUrdf;
-    const auto lower = xml.find("soft_lower_limit='-1'");
-    xml.replace(lower, std::string("soft_lower_limit='-1'").size(), "soft_lower_limit='1.5'");
-    EXPECT_THROW(RokaeHardwareTestPeer::prepareLimits(hardware, xml), std::runtime_error);
-}
-
-TEST_F(RokaeStartup, OutOfRangeCommandsAreClampedWithoutFaultOrChangingFeedback) {
-    RokaeHardware hardware;
-    ASSERT_EQ(hardware.init(parameters("arm")), hardware_interface::CallbackReturn::SUCCESS);
-    RokaeHardwareTestPeer::activateForTest(hardware);
-    RokaeHardwareTestPeer::setFeedback(hardware, 1.1);
-    for (const double target : {-10.0, 10.0}) {
-        RokaeHardwareTestPeer::setArmCommands(hardware, target);
-        EXPECT_EQ(hardware.write(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.002)),
-                  hardware_interface::return_type::OK);
-        EXPECT_FALSE(RokaeHardwareTestPeer::faulted(hardware));
-        for (const double position : RokaeHardwareTestPeer::targets(hardware)) {
-            EXPECT_DOUBLE_EQ(position, target < 0.0 ? -1.0 : 1.0);
-        }
-        for (const double position : RokaeHardwareTestPeer::feedback(hardware)) EXPECT_DOUBLE_EQ(position, 1.1);
-    }
-    const auto previous = RokaeHardwareTestPeer::targets(hardware);
-    RokaeHardwareTestPeer::setArmCommands(hardware, std::numeric_limits<double>::quiet_NaN());
-    EXPECT_EQ(hardware.write(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.002)),
-              hardware_interface::return_type::ERROR);
-    EXPECT_TRUE(RokaeHardwareTestPeer::faulted(hardware));
-    EXPECT_EQ(RokaeHardwareTestPeer::targets(hardware), previous);
-}
 
 TEST_F(RokaeStartup, LoadingBothArmsDoesNotConnectOrStartRealtimeState) {
     RokaeHardware left, right;

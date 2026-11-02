@@ -5,7 +5,6 @@
 #include "rokae_ros2_control/erg32_gripper.h"
 #include "rokae_ros2_control/linkerhand.h"
 #include <pluginlib/class_list_macros.hpp>
-#include <urdf/model.h>
 #include <sstream>
 #include <iomanip>
 #include <type_traits>
@@ -435,12 +434,6 @@ namespace rokae_ros2_control {
             arm_joint_count = joint_count - static_cast<int>(gripper_->getJointCount());
         }
         arm_joint_count_ = static_cast<size_t>(arm_joint_count);
-        try {
-            configureArmPositionLimits(params.hardware_info.original_xml);
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Invalid arm position limits: %s", e.what());
-            return hardware_interface::CallbackReturn::ERROR;
-        }
         command_filters_.assign(arm_joint_count_, DoubleSFilter{});
         for (auto &filter : command_filters_) {
             filter.v_min = -command_filter_max_velocity_;
@@ -1097,94 +1090,28 @@ namespace rokae_ros2_control {
         return hardware_interface::return_type::OK;
     }
 
-    void RokaeHardware::configureArmPositionLimits(const std::string& robot_description) {
-        urdf::Model model;
-        if (!model.initString(robot_description)) {
-            throw std::runtime_error("Cannot parse robot description");
-        }
-        std::vector<std::array<double, 2>> limits;
-        for (size_t i = 0; i < arm_joint_count_; ++i) {
-            const auto joint = model.getJoint(joint_names_.at(i));
-            if (!joint || joint->type != urdf::Joint::REVOLUTE || !joint->limits) {
-                throw std::runtime_error("Missing revolute joint limits for " + joint_names_[i]);
-            }
-            double lower = joint->limits->lower;
-            double upper = joint->limits->upper;
-            if (!std::isfinite(lower) || !std::isfinite(upper)) {
-                throw std::runtime_error("Non-finite position limits for " + joint_names_[i]);
-            }
-            if (joint->safety) {
-                if (!std::isfinite(joint->safety->soft_lower_limit) ||
-                    !std::isfinite(joint->safety->soft_upper_limit)) {
-                    throw std::runtime_error("Non-finite soft limits for " + joint_names_[i]);
-                }
-                lower = std::max(lower, joint->safety->soft_lower_limit);
-                upper = std::min(upper, joint->safety->soft_upper_limit);
-            }
-            if (!std::isfinite(lower) || !std::isfinite(upper) || lower >= upper) {
-                throw std::runtime_error("Invalid position range for " + joint_names_[i]);
-            }
-            limits.push_back({lower, upper});
-        }
-        arm_position_limits_ = std::move(limits);
-    }
-
-    double RokaeHardware::clampArmPosition(size_t index, double position) const {
-        if (!std::isfinite(position)) {
-            throw std::runtime_error("Non-finite position command for " + joint_names_.at(index));
-        }
-        const auto& limits = arm_position_limits_.at(index);
-        return std::clamp(position, limits[0], limits[1]);
-    }
-
-    double RokaeHardware::nextArmPositionCommand(size_t index) {
-        const double target = clampArmPosition(index, target_joint_position_commands_.at(index));
-        if (!use_double_s_filter_) return target;
-        auto& filter = command_filters_.at(index);
-        const double output = filter.updateTo(target);
-        const double limited = clampArmPosition(index, output);
-        const auto& limits = arm_position_limits_.at(index);
-        // Reset motion at the boundary as well as after overshoot. Otherwise
-        // the filter can keep integrating outward behind a saturated output.
-        if (output != limited ||
-            (limited <= limits[0] && (filter.qd < 0.0 || filter.qdd < 0.0)) ||
-            (limited >= limits[1] && (filter.qd > 0.0 || filter.qdd > 0.0))) {
-            filter.reset(limited);
-        }
-        return limited;
-    }
-
     hardware_interface::return_type RokaeHardware::write(
         const rclcpp::Time & /*time*/,
         const rclcpp::Duration & /*period*/) {
         if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
         if (!hardware_active_) return hardware_interface::return_type::OK;
 
-        try {
-            std::lock_guard<std::mutex> lock(data_mutex_);
-            // Validate the whole arm before publishing any part of a new target.
-            for (size_t i = 0; i < arm_joint_count_; ++i) {
-                (void)clampArmPosition(i, joint_position_commands_.at(i));
-            }
-            if (target_joint_position_commands_.size() != joint_position_commands_.size()) {
-                target_joint_position_commands_.resize(joint_position_commands_.size(), 0.0);
-            }
-
-            for (size_t i = 0; i < joint_position_commands_.size(); ++i) {
-                target_joint_position_commands_[i] = i < arm_joint_count_
-                    ? clampArmPosition(i, joint_position_commands_[i]) : joint_position_commands_[i];
-            }
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Invalid arm command: %s", e.what());
-            latchRealtimeFault();
-            return hardware_interface::return_type::ERROR;
-        }
-
         // Initial lazy start only: faults remain latched and cannot trigger a restart.
         if (arm_robot_ && !rt_control_running_) {
             startRealtimeControl();
         }
         if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
+
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            if (target_joint_position_commands_.size() != joint_position_commands_.size()) {
+                target_joint_position_commands_.resize(joint_position_commands_.size(), 0.0);
+            }
+
+            for (size_t i = 0; i < joint_position_commands_.size(); ++i) {
+                target_joint_position_commands_[i] = joint_position_commands_[i];
+            }
+        }
 
         // 夹爪控制：检测命令变化并发送
         if (gripper_ && gripper_->isInitialized()) {
@@ -1430,8 +1357,18 @@ namespace rokae_ros2_control {
                         target_joint_position_commands_.resize(arm_joint_count_, 0.0);
                     }
 
-                    for (size_t i = 0; i < arm_joint_count_; ++i) {
-                        last_sent_joint_positions_[i] = nextArmPositionCommand(i);
+                    if (use_double_s_filter_) {
+                        for (size_t i = 0; i < arm_joint_count_ &&
+                                           i < command_filters_.size() &&
+                                           i < target_joint_position_commands_.size(); ++i) {
+                            last_sent_joint_positions_[i] =
+                                command_filters_[i].updateTo(target_joint_position_commands_[i]);
+                        }
+                    } else {
+                        for (size_t i = 0; i < arm_joint_count_ &&
+                                           i < target_joint_position_commands_.size(); ++i) {
+                            last_sent_joint_positions_[i] = target_joint_position_commands_[i];
+                        }
                     }
 
                     command_positions.assign(

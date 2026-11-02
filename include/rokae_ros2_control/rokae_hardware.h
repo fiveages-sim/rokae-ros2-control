@@ -11,7 +11,6 @@
 #include "rokae/motion_control_rt.h"
 #include "rokae_ros2_control/rokae_gripper_interface.h"
 #include <memory>
-#include <array>
 #include <string>
 #include <vector>
 #include <thread>
@@ -97,10 +96,6 @@ namespace rokae_ros2_control {
         std::vector<double> joint_efforts_commands_; // 关节力矩命令（牛顿）
         std::vector<double> target_joint_position_commands_; // 最新上层位置命令（由1kHz滤波器跟踪）
         std::vector<std::string> joint_names_; // 关节名称列表
-        std::vector<std::array<double, 2>> arm_position_limits_;
-        void configureArmPositionLimits(const std::string& robot_description);
-        double clampArmPosition(size_t index, double position) const;
-        double nextArmPositionCommand(size_t index);
 
         // 夹爪控制
         std::unique_ptr<RokaeGripperInterface> gripper_; // 末端夹具控制器
@@ -148,7 +143,7 @@ namespace rokae_ros2_control {
         // 配置参数
         std::string arm_ip_; // 机械臂IP地址
         std::string local_ip_; // 本地IP地址
-        size_t arm_joint_count_{0}; // 机械臂关节数量（排除夹爪）
+        size_t arm_joint_count_; // 机械臂关节数量（排除夹爪）
         std::string ctrl_mode_; // "POSITION" or "JOINT_IMPEDANCE"
         bool use_impedance_control_; // 是否使用阻抗控制模式
         int rt_cpu_affinity_{-1}; // 实时控制线程 CPU 绑定（-1 表示不绑定）

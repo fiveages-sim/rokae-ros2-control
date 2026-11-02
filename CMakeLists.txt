@@ -17,7 +17,6 @@ find_package(hardware_interface REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(pluginlib REQUIRED)
-find_package(urdf REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(EIGEN3 REQUIRED eigen3)
 pkg_check_modules(OROCOS_KDL REQUIRED orocos-kdl)
@@ -53,7 +52,6 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
         ${rclcpp_TARGETS}
         ${rclcpp_lifecycle_TARGETS}
         ${pluginlib_TARGETS}
-        ${urdf_TARGETS}
         ${CMAKE_CURRENT_SOURCE_DIR}/external/librokae/lib/Linux/${ROKAE_LIB_DIR}/libxCoreSDK.a
         ${CMAKE_CURRENT_SOURCE_DIR}/external/librokae/lib/Linux/${ROKAE_LIB_DIR}/libxMateModel.a
         ${EIGEN3_LIBRARIES}
@@ -94,7 +92,7 @@ if (BUILD_TESTING)
     ament_lint_auto_find_test_dependencies()
 endif ()
 
-ament_export_dependencies(hardware_interface rclcpp rclcpp_lifecycle pluginlib urdf)
+ament_export_dependencies(hardware_interface rclcpp rclcpp_lifecycle pluginlib)
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 
 ament_package()
