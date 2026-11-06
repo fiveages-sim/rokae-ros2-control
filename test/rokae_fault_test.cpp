@@ -16,12 +16,27 @@ public:
     static bool receiving(const RokaeHardware& hardware) { return hardware.state_receive_started_; }
     static bool active(const RokaeHardware& hardware) { return hardware.hardware_active_; }
     static bool faulted(const RokaeHardware& hardware) { return hardware.rt_control_faulted_; }
-    static bool stateJoinable(const RokaeHardware& hardware) { return hardware.state_update_thread_.joinable(); }
     static void activateForTest(RokaeHardware& hardware) { hardware.hardware_active_ = true; }
-    static void finishedStateWorker(RokaeHardware& hardware) {
-        hardware.state_update_thread_ = std::thread([] {});
-        hardware.state_update_running_ = false;
+    static void finishedControlWorker(RokaeHardware& hardware) {
+        hardware.rt_control_thread_ = std::thread([] {});
+        hardware.rt_control_running_ = false;
     }
+    using Snapshot = RokaeHardware::StateSnapshot;
+    static bool publish(RokaeHardware& hardware, Snapshot snapshot) {
+        return hardware.publishStateSnapshot(snapshot);
+    }
+    static void ageState(RokaeHardware& hardware, std::chrono::milliseconds age) {
+        std::lock_guard<std::mutex> lock(hardware.state_mutex_);
+        hardware.state_snapshot_.updated_at = std::chrono::steady_clock::now() - age;
+    }
+    static Snapshot snapshot(RokaeHardware& hardware) { return hardware.stateSnapshot(); }
+    static const auto& positions(const RokaeHardware& hardware) { return hardware.joint_positions_; }
+    static const auto& velocities(const RokaeHardware& hardware) { return hardware.joint_velocities_; }
+    static const auto& efforts(const RokaeHardware& hardware) { return hardware.joint_efforts_; }
+    static const auto& commands(const RokaeHardware& hardware) { return hardware.joint_position_commands_; }
+    static const auto& targets(const RokaeHardware& hardware) { return hardware.target_joint_position_commands_; }
+    static const auto& sent(const RokaeHardware& hardware) { return hardware.last_sent_joint_positions_; }
+    static const auto& filters(const RokaeHardware& hardware) { return hardware.command_filters_; }
     static void rollback(RokaeHardware& hardware) { hardware.rollbackStartupGroup(); }
     static void installTool(RokaeHardware& hardware, std::unique_ptr<RokaeGripperInterface> tool) {
         hardware.gripper_ = std::move(tool);
@@ -116,7 +131,7 @@ TEST_F(RokaeStartup, LoadingBothArmsDoesNotConnectOrStartRealtimeState) {
     for (auto* hardware : {&left, &right}) {
         EXPECT_FALSE(RokaeHardwareTestPeer::connected(*hardware));
         EXPECT_FALSE(RokaeHardwareTestPeer::receiving(*hardware));
-        EXPECT_FALSE(RokaeHardwareTestPeer::stateJoinable(*hardware));
+        EXPECT_FALSE(RokaeHardwareTestPeer::snapshot(*hardware).valid);
         EXPECT_FALSE(RokaeHardwareTestPeer::active(*hardware));
         EXPECT_EQ(hardware->write(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.002)),
                   hardware_interface::return_type::OK);
@@ -202,18 +217,150 @@ TEST_F(RokaeStartup, FailedRightActivationRollsBackLoadedAndActiveSiblings) {
     EXPECT_FALSE(RokaeHardwareTestPeer::faulted(independent));
 }
 
-TEST_F(RokaeStartup, ShutdownAndErrorJoinFinishedStateWorkerAndPreventRestart) {
+TEST_F(RokaeStartup, ShutdownAndErrorJoinFinishedControlWorkerAndPreventRestart) {
     RokaeHardware hardware;
     ASSERT_EQ(hardware.init(parameters("shutdown")), hardware_interface::CallbackReturn::SUCCESS);
     RokaeHardwareTestPeer::activateForTest(hardware);
-    RokaeHardwareTestPeer::finishedStateWorker(hardware);
+    RokaeHardwareTestPeer::Snapshot state;
+    ASSERT_TRUE(RokaeHardwareTestPeer::publish(hardware, state));
+    RokaeHardwareTestPeer::finishedControlWorker(hardware);
     EXPECT_EQ(hardware.on_shutdown(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
-    EXPECT_FALSE(RokaeHardwareTestPeer::stateJoinable(hardware));
+    EXPECT_FALSE(RokaeHardwareTestPeer::joinable(hardware));
+    EXPECT_FALSE(RokaeHardwareTestPeer::snapshot(hardware).valid);
     EXPECT_FALSE(RokaeHardwareTestPeer::active(hardware));
     EXPECT_EQ(hardware.on_error(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
     EXPECT_EQ(hardware.write(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.002)), hardware_interface::return_type::ERROR);
     EXPECT_EQ(hardware.on_cleanup(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
     EXPECT_TRUE(RokaeHardwareTestPeer::faulted(hardware));
+}
+
+TEST_F(RokaeStartup, CachedFeedbackIsAvailableBeforeRealtimeStartsWithoutSdkCalls) {
+    RokaeHardware hardware;
+    ASSERT_EQ(hardware.init(parameters("feedback")), hardware_interface::CallbackReturn::SUCCESS);
+    RokaeHardwareTestPeer::Snapshot state;
+    for (size_t i = 0; i < 7; ++i) {
+        state.positions[i] = 0.01 * i;
+        state.velocities[i] = 0.02 * i;
+        state.efforts[i] = 0.03 * i;
+    }
+    ASSERT_TRUE(RokaeHardwareTestPeer::publish(hardware, state));
+    ASSERT_EQ(hardware.read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.01)),
+              hardware_interface::return_type::OK);
+    for (size_t i = 0; i < 7; ++i) {
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::positions(hardware)[i], state.positions[i]);
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::velocities(hardware)[i], state.velocities[i]);
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::efforts(hardware)[i], state.efforts[i]);
+    }
+    EXPECT_FALSE(RokaeHardwareTestPeer::connected(hardware));
+    EXPECT_FALSE(RokaeHardwareTestPeer::running(hardware));
+}
+
+TEST_F(RokaeStartup, NonFiniteFeedbackCannotReplaceTheLastCompleteSnapshot) {
+    RokaeHardware hardware;
+    ASSERT_EQ(hardware.init(parameters("invalid_feedback")), hardware_interface::CallbackReturn::SUCCESS);
+    RokaeHardwareTestPeer::Snapshot state;
+    state.positions.fill(0.1);
+    ASSERT_TRUE(RokaeHardwareTestPeer::publish(hardware, state));
+    for (int field = 0; field < 3; ++field) {
+        auto bad = state;
+        auto& values = field == 0 ? bad.positions : field == 1 ? bad.velocities : bad.efforts;
+        values[3] = std::numeric_limits<double>::quiet_NaN();
+        EXPECT_FALSE(RokaeHardwareTestPeer::publish(hardware, bad));
+        const auto cached = RokaeHardwareTestPeer::snapshot(hardware);
+        EXPECT_EQ(cached.positions, state.positions);
+        EXPECT_EQ(cached.velocities, state.velocities);
+        EXPECT_EQ(cached.efforts, state.efforts);
+    }
+}
+
+TEST_F(RokaeStartup, ConcurrentFeedbackAndReadKeepPositionVelocityAndEffortCoherent) {
+    RokaeHardware hardware;
+    ASSERT_EQ(hardware.init(parameters("coherent_feedback")), hardware_interface::CallbackReturn::SUCCESS);
+    std::atomic<bool> done{false};
+    std::thread producer([&] {
+        for (int frame = 1; frame <= 10000; ++frame) {
+            RokaeHardwareTestPeer::Snapshot state;
+            state.positions.fill(frame);
+            state.velocities.fill(frame * 2);
+            state.efforts.fill(frame * 3);
+            RokaeHardwareTestPeer::publish(hardware, state);
+        }
+        done = true;
+    });
+    do {
+        EXPECT_EQ(hardware.read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.01)),
+                  hardware_interface::return_type::OK);
+        const double frame = RokaeHardwareTestPeer::positions(hardware)[0];
+        for (size_t i = 0; i < 7; ++i) {
+            EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::positions(hardware)[i], frame);
+            EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::velocities(hardware)[i], frame * 2);
+            EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::efforts(hardware)[i], frame * 3);
+        }
+    } while (!done);
+    producer.join();
+}
+
+TEST_F(RokaeStartup, PositionModeUsesFreshSnapshotToSyncCommandsAndFiltersWithoutSdkConnection) {
+    RokaeHardware hardware;
+    auto p = parameters("position_sync");
+    p.hardware_info.hardware_parameters["ctrl_mode"] = "JOINT_IMPEDANCE";
+    ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+    RokaeHardwareTestPeer::Snapshot state;
+    state.positions.fill(0.15);
+    state.velocities.fill(0.05);
+    ASSERT_TRUE(RokaeHardwareTestPeer::publish(hardware, state));
+    RokaeHardwareTestPeer::activateForTest(hardware);
+    const auto change = hardware.get_node()->set_parameters_atomically({
+        rclcpp::Parameter("ctrl_mode", "POSITION")});
+    ASSERT_TRUE(change.successful) << change.reason;
+    for (size_t i = 0; i < 7; ++i) {
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::commands(hardware)[i], state.positions[i]);
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::targets(hardware)[i], state.positions[i]);
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::sent(hardware)[i], state.positions[i]);
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::filters(hardware)[i].q, state.positions[i]);
+        EXPECT_DOUBLE_EQ(RokaeHardwareTestPeer::filters(hardware)[i].qd, state.velocities[i]);
+    }
+    EXPECT_FALSE(RokaeHardwareTestPeer::connected(hardware));
+}
+
+TEST_F(RokaeStartup, StaleOrMissingStateRejectsPositionSwitchWithoutChangingCommands) {
+    for (const bool stale : {false, true}) {
+        RokaeHardware hardware;
+        auto p = parameters("stale_sync");
+        p.hardware_info.hardware_parameters["ctrl_mode"] = "JOINT_IMPEDANCE";
+        ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+        if (stale) {
+            RokaeHardwareTestPeer::Snapshot state;
+            state.positions.fill(0.15);
+            ASSERT_TRUE(RokaeHardwareTestPeer::publish(hardware, state));
+            RokaeHardwareTestPeer::ageState(hardware, std::chrono::seconds(1));
+        }
+        RokaeHardwareTestPeer::activateForTest(hardware);
+        const auto previous = RokaeHardwareTestPeer::commands(hardware);
+        const auto result = hardware.get_node()->set_parameters_atomically({
+            rclcpp::Parameter("ctrl_mode", "POSITION")});
+        EXPECT_FALSE(result.successful);
+        EXPECT_EQ(hardware.get_node()->get_parameter("ctrl_mode").as_string(), "JOINT_IMPEDANCE");
+        EXPECT_EQ(RokaeHardwareTestPeer::commands(hardware), previous);
+        EXPECT_FALSE(RokaeHardwareTestPeer::connected(hardware));
+    }
+}
+
+TEST_F(RokaeStartup, FailedPositionSyncAfterMoveStopCannotResumeOldCommands) {
+    RokaeHardware hardware;
+    auto p = parameters("failed_running_sync");
+    p.hardware_info.hardware_parameters["ctrl_mode"] = "JOINT_IMPEDANCE";
+    ASSERT_EQ(hardware.init(p), hardware_interface::CallbackReturn::SUCCESS);
+    RokaeHardwareTestPeer::activateForTest(hardware);
+    RokaeHardwareTestPeer::setRunning(hardware, true);
+    const auto result = hardware.get_node()->set_parameters_atomically({
+        rclcpp::Parameter("ctrl_mode", "POSITION")});
+    EXPECT_FALSE(result.successful);
+    EXPECT_TRUE(RokaeHardwareTestPeer::faulted(hardware));
+    EXPECT_FALSE(RokaeHardwareTestPeer::running(hardware));
+    EXPECT_FALSE(RokaeHardwareTestPeer::restartRequested(hardware));
+    EXPECT_EQ(hardware.write(rclcpp::Time{}, rclcpp::Duration::from_seconds(0.01)),
+              hardware_interface::return_type::ERROR);
 }
 
 class ToolDynamicsProbe : public RokaeGripperInterface {

@@ -22,6 +22,26 @@ cd ~/ros2_ws
 colcon build --packages-up-to rokae_ros2_control --symlink-install
 ```
 
+### Real-time state ownership
+
+The SDK receives state at a configured 1 ms interval. With
+`setControlLoop(callback, 50, true)`, the SDK updates state before each callback;
+the driver does not start an additional state-update thread or call
+`updateRobotState()` from ROS reads or control-mode changes. The callback reads
+position, velocity and effort into local arrays, validates them, and publishes
+one mutex-protected snapshot. ROS `read()` only copies that snapshot. The SDK
+filter settings, receive timeout and realtime CPU affinity are unchanged.
+The obsolete `state_cpu_affinity` hardware parameter is ignored with a warning.
+
+Activation seeds the snapshot from the initial `jointPos()` RPC so that state
+is available before the first realtime write. Switching to `POSITION` uses a
+snapshot no older than 50 ms; if it is unavailable or stale, the driver queries
+`jointPos()` by RPC, checking the joint count and finite positions. It never
+invokes a second realtime state update. If a switch has already stopped the
+move and obtaining a valid position fails, the driver latches a fault instead
+of restarting with old commands. Shutdown joins the realtime loop before
+invalidating the snapshot and closing state reception.
+
 ## 3. Rokae end-tool RS485 gripper
 
 The hardware plugin can control a gripper joint through the robot end-tool

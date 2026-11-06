@@ -26,6 +26,7 @@ namespace rokae_ros2_control {
         constexpr int kSdkFilterJointFrequency = 10;
         constexpr int kSdkFilterCartesianFrequency = 10;
         constexpr int kSdkFilterTorqueFrequency = 10;
+        constexpr auto kStateSnapshotMaxAge = std::chrono::milliseconds(50);
 
         std::string normalizeControlMode(const std::string &mode) {
             std::string normalized = mode;
@@ -282,7 +283,10 @@ namespace rokae_ros2_control {
         local_ip_ = get_hardware_parameter("local_ip", std::string("192.168.1.233"));
         const int cpu_affinity = get_hardware_parameter("cpu_affinity", -1);
         rt_cpu_affinity_ = get_hardware_parameter("rt_cpu_affinity", cpu_affinity);
-        state_cpu_affinity_ = get_hardware_parameter("state_cpu_affinity", cpu_affinity);
+        if (params.hardware_info.hardware_parameters.count("state_cpu_affinity")) {
+            RCLCPP_WARN(get_node()->get_logger(),
+                        "state_cpu_affinity is ignored; the SDK realtime loop owns state updates");
+        }
         std::string command_filter_mode =
             get_hardware_parameter("command_filter_mode", std::string("double_s"));
         std::transform(command_filter_mode.begin(), command_filter_mode.end(), command_filter_mode.begin(),
@@ -457,8 +461,7 @@ namespace rokae_ros2_control {
         RCLCPP_INFO(get_node()->get_logger(), "  Local IP: %s", local_ip_.c_str());
         RCLCPP_INFO(get_node()->get_logger(), "  Number of joints: %d", joint_count);
         RCLCPP_INFO(get_node()->get_logger(), "  Control mode: %s", ctrl_mode_.c_str());
-        RCLCPP_INFO(get_node()->get_logger(), "  CPU affinity: rt=%d, state=%d",
-                    rt_cpu_affinity_, state_cpu_affinity_);
+        RCLCPP_INFO(get_node()->get_logger(), "  CPU affinity: rt=%d", rt_cpu_affinity_);
         RCLCPP_INFO(get_node()->get_logger(),
                     "  Command filter: %s (v=%.3f rad/s, a=%.3f rad/s^2, j=%.3f rad/s^3)",
                     use_double_s_filter_ ? "double_s" : "off",
@@ -763,6 +766,9 @@ namespace rokae_ros2_control {
 
         if (switching_to_position && hardware_active_) {
             if (!syncPositionCommandsToCurrentState("switching ctrl_mode to POSITION")) {
+                // A move already stopped for this switch must not resume with
+                // the old commands after failing to obtain a current position.
+                if (restart_rt_move) latchRealtimeFault();
                 result.successful = false;
                 result.reason = "failed to sync position commands before switching to POSITION";
                 return result;
@@ -810,37 +816,38 @@ namespace rokae_ros2_control {
     }
 
     bool RokaeHardware::syncPositionCommandsToCurrentState(const std::string &reason) {
-        if (!arm_robot_) {
-            return false;
-        }
-
         std::vector<double> current_positions(arm_joint_count_, 0.0);
+        std::array<double, 7> current_velocities{};
         bool got_positions = false;
-
-        try {
-            arm_robot_->updateRobotState(std::chrono::milliseconds(1));
-            arm_robot_->getStateData(rokae::RtSupportedFields::jointPos_m, joint_positions_array_);
-            for (size_t i = 0; i < arm_joint_count_ && i < joint_positions_array_.size(); ++i) {
-                current_positions[i] = joint_positions_array_[i];
+        const auto snapshot = stateSnapshot();
+        const auto now = std::chrono::steady_clock::now();
+        if (snapshot.valid && snapshot.updated_at <= now &&
+            now - snapshot.updated_at <= kStateSnapshotMaxAge) {
+            for (size_t i = 0; i < arm_joint_count_; ++i) {
+                current_positions[i] = snapshot.positions[i];
             }
+            current_velocities = snapshot.velocities;
             got_positions = true;
-        } catch (const std::exception &e) {
-            RCLCPP_WARN(get_node()->get_logger(),
-                        "Failed to read RT state while %s: %s", reason.c_str(), e.what());
         }
 
-        if (!got_positions) {
+        // stopMove() does not establish exclusive ownership of the SDK state
+        // receiver. A stale/missing snapshot falls back to an RPC, never to a
+        // second updateRobotState() call racing the realtime scheduler.
+        if (!got_positions && arm_robot_) {
             std::error_code ec;
             try {
                 const auto joint_pos = arm_robot_->jointPos(ec);
-                if (!ec) {
-                    for (size_t i = 0; i < arm_joint_count_ && i < joint_pos.size(); ++i) {
+                if (!ec && joint_pos.size() == arm_joint_count_ &&
+                    std::all_of(joint_pos.begin(), joint_pos.end(),
+                                [](double q) { return std::isfinite(q); })) {
+                    for (size_t i = 0; i < arm_joint_count_; ++i) {
                         current_positions[i] = joint_pos[i];
                     }
                     got_positions = true;
                 } else {
                     RCLCPP_WARN(get_node()->get_logger(),
-                                "Failed to read jointPos while %s: %s", reason.c_str(), ec.message().c_str());
+                                "Invalid or unavailable jointPos while %s: %s",
+                                reason.c_str(), ec.message().c_str());
                 }
             } catch (const std::exception &e) {
                 RCLCPP_WARN(get_node()->get_logger(),
@@ -849,12 +856,13 @@ namespace rokae_ros2_control {
         }
 
         if (!got_positions) {
+            RCLCPP_ERROR(get_node()->get_logger(),
+                         "No fresh valid position available while %s", reason.c_str());
             return false;
         }
 
         std::lock_guard<std::mutex> lock(data_mutex_);
         for (size_t i = 0; i < arm_joint_count_ && i < joint_position_commands_.size(); ++i) {
-            joint_positions_[i] = current_positions[i];
             joint_position_commands_[i] = current_positions[i];
             target_joint_position_commands_[i] = current_positions[i];
             prev_joint_position_commands_[i] = current_positions[i];
@@ -862,22 +870,40 @@ namespace rokae_ros2_control {
             last_sent_joint_positions_[i] = current_positions[i];
         }
         interpolation_alpha_ = 0.0;
-        resetCommandFilters(last_sent_joint_positions_);
+        resetCommandFilters(last_sent_joint_positions_, current_velocities);
 
         RCLCPP_INFO(get_node()->get_logger(),
                     "Synced position commands to current state while %s", reason.c_str());
         return true;
     }
 
-    void RokaeHardware::resetCommandFilters(const std::vector<double> &positions) {
+    void RokaeHardware::resetCommandFilters(
+        const std::vector<double> &positions, const std::array<double, 7> &velocities) {
         const size_t count = std::min(command_filters_.size(), positions.size());
         for (size_t i = 0; i < count; ++i) {
-            double velocity = 0.0;
-            if (i < joint_velocities_.size()) {
-                velocity = joint_velocities_[i];
-            }
+            const double velocity = i < velocities.size() ? velocities[i] : 0.0;
             command_filters_[i].reset(positions[i], velocity, 0.0);
         }
+    }
+
+    bool RokaeHardware::publishStateSnapshot(StateSnapshot snapshot) {
+        const auto finite = [](const auto &values) {
+            return std::all_of(values.begin(), values.end(),
+                               [](double value) { return std::isfinite(value); });
+        };
+        if (!finite(snapshot.positions) || !finite(snapshot.velocities) || !finite(snapshot.efforts)) {
+            return false;
+        }
+        snapshot.updated_at = std::chrono::steady_clock::now();
+        snapshot.valid = true;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state_snapshot_ = snapshot;
+        return true;
+    }
+
+    RokaeHardware::StateSnapshot RokaeHardware::stateSnapshot() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return state_snapshot_;
     }
 
     hardware_interface::CallbackReturn
@@ -917,11 +943,12 @@ namespace rokae_ros2_control {
             auto current_pos = arm_robot_->jointPos(ec);
             if (!ec && current_pos.size() == arm_joint_count_ &&
                 std::all_of(current_pos.begin(), current_pos.end(), [](double q) { return std::isfinite(q); })) {
+                StateSnapshot initial_state;
                 for (size_t i = 0; i < arm_joint_count_; ++i) {
-                    joint_positions_array_[i] = current_pos[i];
-                    joint_velocities_array_[i] = 0.0;
-                    joint_efforts_array_[i] = 0.0;
+                    initial_state.positions[i] = current_pos[i];
                     joint_positions_[i] = current_pos[i];
+                    joint_velocities_[i] = 0.0;
+                    joint_efforts_[i] = 0.0;
                     joint_position_commands_[i] = current_pos[i];
                     target_joint_position_commands_[i] = current_pos[i];
                     // 初始化插值命令为当前位置
@@ -929,6 +956,7 @@ namespace rokae_ros2_control {
                     next_joint_position_commands_[i] = current_pos[i];
                     last_sent_joint_positions_[i] = current_pos[i];
                 }
+                publishStateSnapshot(initial_state);
                 // 插值相关变量会在第一次write调用时初始化
                 interpolation_alpha_ = 0.0;
                 resetCommandFilters(last_sent_joint_positions_);
@@ -1068,12 +1096,14 @@ namespace rokae_ros2_control {
         const rclcpp::Duration & /*period*/) {
         if (rt_control_faulted_) return hardware_interface::return_type::ERROR;
 
-        // 从缓存的状态数据获取关节信息
-        if (arm_robot_ && state_receive_started_) {
+        // No SDK calls here: startup and realtime feedback use the same
+        // coherent snapshot, independently of the lifetime of arm_robot_.
+        const auto snapshot = stateSnapshot();
+        if (snapshot.valid) {
             for (size_t i = 0; i < arm_joint_count_; ++i) {
-                joint_positions_[i] = joint_positions_array_[i];
-                joint_velocities_[i] = joint_velocities_array_[i];
-                joint_efforts_[i] = joint_efforts_array_[i];
+                joint_positions_[i] = snapshot.positions[i];
+                joint_velocities_[i] = snapshot.velocities[i];
+                joint_efforts_[i] = snapshot.efforts[i];
             }
         }
 
@@ -1176,7 +1206,10 @@ namespace rokae_ros2_control {
             rt_control_running_ = false;
             rt_move_restart_requested_ = false;
             state_receive_started_ = false;
-            state_update_running_ = false;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                state_snapshot_ = {};
+            }
 
             // 启动状态接收
             try {
@@ -1195,8 +1228,8 @@ namespace rokae_ros2_control {
                 // 等待状态接收稳定
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-                // 启动状态更新线程
-                startStateUpdate();
+                // setControlLoop(..., true) owns state updates. Starting a
+                // second receiver here can disturb SDK command pacing.
             } catch (const std::exception &e) {
                 RCLCPP_WARN(get_node()->get_logger(), "Failed to start robot state receiving: %s", e.what());
                 throw;
@@ -1298,7 +1331,10 @@ namespace rokae_ros2_control {
         // Stop producers first, including finished-but-unjoined workers. Never let
         // a tool transfer delay cancellation of the arm's realtime command loop.
         stopRealtimeControl();
-        stopStateUpdate();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            state_snapshot_ = {};
+        }
         if (gripper_) gripper_->stop();
         if (!arm_robot_) return;
 
@@ -1345,10 +1381,15 @@ namespace rokae_ros2_control {
         try {
             // 设置控制回调（1kHz执行）
             const std::function callback = [this] {
-                // 读取机器人状态
-                arm_robot_->getStateData(rokae::RtSupportedFields::jointPos_m, joint_positions_array_);
-                arm_robot_->getStateData(rokae::RtSupportedFields::jointVel_m, joint_velocities_array_);
-                arm_robot_->getStateData(rokae::RtSupportedFields::tau_m, joint_efforts_array_);
+                // The SDK already updated this frame before entering the callback.
+                // Read into local storage; never hold the snapshot lock across SDK calls.
+                StateSnapshot snapshot;
+                if (arm_robot_->getStateData(rokae::RtSupportedFields::jointPos_m, snapshot.positions) != 0 ||
+                    arm_robot_->getStateData(rokae::RtSupportedFields::jointVel_m, snapshot.velocities) != 0 ||
+                    arm_robot_->getStateData(rokae::RtSupportedFields::tau_m, snapshot.efforts) != 0 ||
+                    !publishStateSnapshot(snapshot)) {
+                    throw std::runtime_error("Invalid or incomplete realtime state frame");
+                }
 
                 std::vector<double> command_positions;
                 {
@@ -1466,59 +1507,6 @@ namespace rokae_ros2_control {
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_node()->get_logger(), "Control loop error: %s", e.what());
             if (rt_control_running_) latchRealtimeFault();
-        }
-    }
-
-    void RokaeHardware::startStateUpdate() {
-        if (state_update_running_) {
-            return;
-        }
-
-        try {
-            state_update_running_ = true;
-            state_update_thread_ = std::thread(&RokaeHardware::stateUpdateLoop, this);
-            bindThreadToCpu(state_update_thread_, state_cpu_affinity_, "state update");
-            RCLCPP_INFO(get_node()->get_logger(), "State update thread started");
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Failed to start state update thread: %s", e.what());
-            state_update_running_ = false;
-            throw;
-        }
-    }
-
-    void RokaeHardware::stopStateUpdate() {
-        if (!state_update_running_ && !state_update_thread_.joinable()) {
-            return;
-        }
-
-        state_update_running_ = false;
-
-        if (state_update_thread_.joinable()) {
-            state_update_thread_.join();
-        }
-
-        RCLCPP_INFO(get_node()->get_logger(), "State update thread stopped");
-    }
-
-    void RokaeHardware::stateUpdateLoop() {
-        while (state_update_running_ && arm_robot_) {
-            try {
-                // 更新机器人状态
-                arm_robot_->updateRobotState(std::chrono::microseconds(100));
-            } catch (const std::exception &e) {
-                RCLCPP_ERROR_THROTTLE(
-                    get_node()->get_logger(),
-                    *get_node()->get_clock(),
-                    1000,
-                    "State update error: %s", e.what()
-                );
-                if (state_update_running_) latchRealtimeFault();
-                state_update_running_ = false;
-                return;
-            }
-
-            // 避免过度占用CPU
-            std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 20Hz
         }
     }
 

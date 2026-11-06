@@ -11,6 +11,8 @@
 #include "rokae/motion_control_rt.h"
 #include "rokae_ros2_control/rokae_gripper_interface.h"
 #include <memory>
+#include <array>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <thread>
@@ -86,11 +88,8 @@ namespace rokae_ros2_control {
     private:
         // 关节数据存储（动态大小，根据配置）
         std::vector<double> joint_positions_; // 关节位置（弧度）
-        std::array<double, 7> joint_positions_array_{}; // 关节位置（弧度）
         std::vector<double> joint_velocities_; // 关节速度（弧度/秒）
-        std::array<double, 7> joint_velocities_array_{}; // 关节速度（弧度）
         std::vector<double> joint_efforts_; // 关节力矩（N·m）
-        std::array<double, 7> joint_efforts_array_{}; // 关节力矩（弧度）
         std::vector<double> joint_position_commands_; // 关节位置命令（弧度）
         std::vector<double> joint_velocities_commands_; // 关节速度命令（弧度）
         std::vector<double> joint_efforts_commands_; // 关节力矩命令（牛顿）
@@ -147,7 +146,6 @@ namespace rokae_ros2_control {
         std::string ctrl_mode_; // "POSITION" or "JOINT_IMPEDANCE"
         bool use_impedance_control_; // 是否使用阻抗控制模式
         int rt_cpu_affinity_{-1}; // 实时控制线程 CPU 绑定（-1 表示不绑定）
-        int state_cpu_affinity_{-1}; // 状态更新线程 CPU 绑定（-1 表示不绑定）
         std::array<double, 7> joint_impedance_; // 关节阻抗系数（Nm/rad）
         rokae::Load load_; // 机器人法兰端负载参数
         std::string load_profile_; // 负载参数来源，用于启动日志
@@ -170,8 +168,19 @@ namespace rokae_ros2_control {
 
         // 状态接收相关
         std::atomic<bool> state_receive_started_{false};
-        std::thread state_update_thread_;
-        std::atomic<bool> state_update_running_{false};
+        struct StateSnapshot {
+            std::array<double, 7> positions{};
+            std::array<double, 7> velocities{};
+            std::array<double, 7> efforts{};
+            std::chrono::steady_clock::time_point updated_at{};
+            bool valid{false};
+        };
+        // Only the SDK callback publishes realtime feedback. ROS read() and
+        // parameter callbacks copy a complete snapshot without calling updateRobotState().
+        std::mutex state_mutex_;
+        StateSnapshot state_snapshot_;
+        bool publishStateSnapshot(StateSnapshot snapshot);
+        StateSnapshot stateSnapshot();
 
         // xCoreSDK相关方法
         void initializeXCoreSDK();
@@ -207,14 +216,8 @@ namespace rokae_ros2_control {
 
         bool syncPositionCommandsToCurrentState(const std::string &reason);
 
-        void resetCommandFilters(const std::vector<double> &positions);
-
-        // 状态更新相关方法
-        void startStateUpdate();
-
-        void stopStateUpdate();
-
-        void stateUpdateLoop();
+        void resetCommandFilters(const std::vector<double> &positions,
+                                 const std::array<double, 7> &velocities = {});
 
         void bindThreadToCpu(std::thread &thread, int cpu_id, const std::string &thread_name);
     };
