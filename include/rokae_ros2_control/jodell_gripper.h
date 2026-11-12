@@ -50,6 +50,8 @@ public:
      * @brief 析构函数，清理后台线程
      */
     ~JodellGripper() override;
+    void stop() override;
+    bool communicationStopped() const override { return !command_thread_.joinable() && robot_ptr_ == nullptr; }
 
     /**
      * @brief 初始化夹爪
@@ -98,6 +100,7 @@ public:
     void exportCommandInterfaces(std::vector<hardware_interface::CommandInterface::SharedPtr>& command_interfaces) override;
 
 private:
+    friend class Rs485LifecycleTestPeer;
     // 日志相关
     rclcpp::Logger logger_;         // ROS2日志记录器
     rclcpp::Clock::SharedPtr clock_; // ROS2时钟（用于限流日志）

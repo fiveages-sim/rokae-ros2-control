@@ -27,6 +27,7 @@ public:
     ~Erg32Gripper() override;
     bool initialize(rokae::xMateErProRobot& robot) override;
     void stop() override;
+    bool communicationStopped() const override { return !worker_.joinable() && !transfer_; }
     bool readStatusPeriodic() override;
     bool writeCommandPeriodic() override;
     bool hasGripper() const override { return true; }

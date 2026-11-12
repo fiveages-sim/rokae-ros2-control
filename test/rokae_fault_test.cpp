@@ -1,8 +1,11 @@
 #include "rokae_ros2_control/rokae_hardware.h"
 #include "rokae_ros2_control/ag2f90d_gripper.h"
 #include "rokae_ros2_control/changingtek_model.h"
+#include "rokae_ros2_control/jodell_gripper.h"
+#include "rokae_ros2_control/linkerhand.h"
 
 #include <gtest/gtest.h>
+#include <future>
 
 namespace rokae_ros2_control {
 
@@ -365,6 +368,8 @@ TEST_F(RokaeStartup, FailedPositionSyncAfterMoveStopCannotResumeOldCommands) {
 
 class ToolDynamicsProbe : public RokaeGripperInterface {
 public:
+    void stop() override {}
+    bool communicationStopped() const override { return true; }
     double torque = 1.0, velocity = 1.0, storage = 0.0;
     int updates = 0;
     std::string name = "gripper_joint";
@@ -382,6 +387,120 @@ public:
     void exportStateInterfaces(std::vector<hardware_interface::StateInterface::ConstSharedPtr>&) override {}
     void exportCommandInterfaces(std::vector<hardware_interface::CommandInterface::SharedPtr>&) override {}
 };
+
+class ShutdownToolProbe : public ToolDynamicsProbe {
+public:
+    explicit ShutdownToolProbe(std::function<void()> action, bool stopped = true)
+        : action_(std::move(action)), stopped_(stopped) {}
+    void stop() override { action_(); }
+    bool communicationStopped() const override { return stopped_; }
+private:
+    std::function<void()> action_;
+    bool stopped_;
+};
+
+TEST_F(RokaeStartup, UnresolvedToolWorkerCannotReturnIntoSdkDestructors) {
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    EXPECT_EXIT({
+        RokaeHardware hardware;
+        if (hardware.init(parameters("unresolved")) != hardware_interface::CallbackReturn::SUCCESS) std::_Exit(2);
+        RokaeHardwareTestPeer::installTool(hardware, std::make_unique<ShutdownToolProbe>([] {
+            throw std::runtime_error("unresolved communication worker");
+        }, false));
+        hardware.on_deactivate(rclcpp_lifecycle::State{});
+        std::_Exit(3);
+    }, ::testing::KilledBySignal(SIGKILL), "terminating controller process");
+}
+
+TEST_F(RokaeStartup, DeactivationCancelsAndJoinsBothArmsBeforeStoppingAnyTool) {
+    RokaeHardware left, right, independent;
+    ASSERT_EQ(left.init(parameters("left")), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(right.init(parameters("right")), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(independent.init(parameters("other", false, "other_group")), hardware_interface::CallbackReturn::SUCCESS);
+    for (auto* arm : {&left, &right, &independent}) {
+        RokaeHardwareTestPeer::activateForTest(*arm);
+        RokaeHardwareTestPeer::Snapshot state;
+        ASSERT_TRUE(RokaeHardwareTestPeer::publish(*arm, state));
+        RokaeHardwareTestPeer::finishedControlWorker(*arm);
+    }
+    std::vector<std::string> stopped;
+    for (auto* arm : {&left, &right}) {
+        const std::string side = arm == &left ? "left" : "right";
+        RokaeHardwareTestPeer::installTool(*arm, std::make_unique<ShutdownToolProbe>([&, side] {
+            for (auto* peer : {&left, &right}) {
+                EXPECT_FALSE(RokaeHardwareTestPeer::active(*peer));
+                EXPECT_FALSE(RokaeHardwareTestPeer::running(*peer));
+                EXPECT_FALSE(RokaeHardwareTestPeer::joinable(*peer));
+                EXPECT_FALSE(RokaeHardwareTestPeer::snapshot(*peer).valid);
+            }
+            stopped.push_back(side);
+        }));
+    }
+    EXPECT_EQ(right.on_deactivate(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_EQ(stopped, (std::vector<std::string>{"left", "right"}));
+    EXPECT_TRUE(RokaeHardwareTestPeer::active(independent));
+    EXPECT_TRUE(RokaeHardwareTestPeer::snapshot(independent).valid);
+    EXPECT_TRUE(RokaeHardwareTestPeer::joinable(independent));
+    // The manager will subsequently invoke the remaining lifecycle callbacks.
+    EXPECT_EQ(left.on_shutdown(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_EQ(right.on_cleanup(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_EQ(stopped.size(), 6u);
+    for (auto* arm : {&left, &right}) RokaeHardwareTestPeer::installTool(*arm, nullptr);
+}
+
+TEST_F(RokaeStartup, ToolStopFailureStillStopsSiblingAndCanBeRetried) {
+    RokaeHardware left, right;
+    ASSERT_EQ(left.init(parameters("left")), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(right.init(parameters("right")), hardware_interface::CallbackReturn::SUCCESS);
+    bool fail = true;
+    int left_stops = 0, right_stops = 0;
+    RokaeHardwareTestPeer::installTool(left, std::make_unique<ShutdownToolProbe>([&] {
+        ++left_stops;
+        if (fail) throw std::runtime_error("simulated tool stop failure");
+    }));
+    RokaeHardwareTestPeer::installTool(right, std::make_unique<ShutdownToolProbe>([&] { ++right_stops; }));
+    RokaeHardwareTestPeer::activateForTest(left);
+    RokaeHardwareTestPeer::activateForTest(right);
+    EXPECT_EQ(right.on_deactivate(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::ERROR);
+    EXPECT_EQ(left_stops, 1);
+    EXPECT_EQ(right_stops, 1);
+    EXPECT_FALSE(RokaeHardwareTestPeer::active(left));
+    EXPECT_FALSE(RokaeHardwareTestPeer::active(right));
+    fail = false;
+    EXPECT_EQ(left.on_cleanup(rclcpp_lifecycle::State{}), hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_EQ(left_stops, 2);
+    EXPECT_EQ(right_stops, 2);
+    for (auto* arm : {&left, &right}) RokaeHardwareTestPeer::installTool(*arm, nullptr);
+}
+
+TEST_F(RokaeStartup, ParameterCallbacksWaitUntilGroupShutdownFinishes) {
+    RokaeHardware left, right;
+    ASSERT_EQ(left.init(parameters("left")), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(right.init(parameters("right")), hardware_interface::CallbackReturn::SUCCESS);
+    std::promise<void> stopping_tool, release_tool, parameter_started;
+    auto stopping_future = stopping_tool.get_future();
+    auto release_future = release_tool.get_future();
+    auto parameter_started_future = parameter_started.get_future();
+    RokaeHardwareTestPeer::installTool(left, std::make_unique<ShutdownToolProbe>([&] {
+        stopping_tool.set_value();
+        release_future.wait();
+    }));
+    auto shutdown = std::async(std::launch::async, [&] {
+        return right.on_deactivate(rclcpp_lifecycle::State{});
+    });
+    stopping_future.wait();
+    auto parameter = std::async(std::launch::async, [&] {
+        parameter_started.set_value();
+        return right.get_node()->set_parameter(rclcpp::Parameter("ctrl_mode", "JOINT_IMPEDANCE"));
+    });
+    parameter_started_future.wait();
+    const auto during_shutdown = parameter.wait_for(std::chrono::milliseconds(50));
+    release_tool.set_value();
+    EXPECT_EQ(shutdown.get(), hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_TRUE(parameter.get().successful);
+    EXPECT_EQ(during_shutdown, std::future_status::timeout);
+    RokaeHardwareTestPeer::installTool(left, nullptr);
+}
 
 TEST_F(RokaeStartup, DeclaresInstanceLocalToolParametersAndReadsHardwareDefaults) {
     RokaeHardware left, right;
@@ -526,6 +645,99 @@ TEST(ChangingtekLifecycle, StopJoinsWorkerAndClearsPendingCommands) {
     EXPECT_FALSE(ChangingtekGripperTestPeer::worker(tool));
     EXPECT_TRUE(ChangingtekGripperTestPeer::emptyQueue(tool));
     tool.stop();
+}
+
+// Model an SDK transaction already in flight, without a robot connection. stop()
+// must wait for it before the hardware owner is allowed to release the SDK.
+class Rs485LifecycleTestPeer {
+public:
+    static void start(JodellGripper& tool, std::function<void()> transaction) {
+        tool.command_queue_.push({123, 100, 100});
+        tool.initialized_ = true;
+        tool.thread_running_ = true;
+        tool.background_status_valid_ = true;
+        tool.command_thread_ = std::thread(std::move(transaction));
+    }
+    static void start(LinkerHand& tool, std::function<void()> transaction) {
+        tool.initialized_ = true;
+        tool.running_ = true;
+        tool.command_pending_ = true;
+        tool.have_valid_positions_ = true;
+        tool.communication_thread_ = std::thread(std::move(transaction));
+    }
+    static bool worker(const JodellGripper& tool) { return tool.command_thread_.joinable(); }
+    static bool worker(const LinkerHand& tool) { return tool.communication_thread_.joinable(); }
+    static bool cleared(const JodellGripper& tool) {
+        return !tool.thread_running_ && tool.robot_ptr_ == nullptr &&
+               tool.command_queue_.empty() && !tool.background_status_valid_;
+    }
+    static bool cleared(const LinkerHand& tool) {
+        return !tool.running_ && tool.robot_ == nullptr &&
+               !tool.command_pending_ && !tool.have_valid_positions_;
+    }
+};
+
+template<class Tool>
+void expectStopWaitsForTransaction(Tool& tool) {
+    EXPECT_FALSE(Rs485LifecycleTestPeer::worker(tool));
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    auto release_future = release.get_future();
+    std::atomic<bool> exited{false};
+    Rs485LifecycleTestPeer::start(tool, [&] {
+        entered.set_value();
+        release_future.wait();
+        exited = true;
+    });
+    entered_future.wait();
+    RokaeGripperInterface& interface = tool;
+    std::promise<void> stopping;
+    auto stopping_future = stopping.get_future();
+    auto stopped = std::async(std::launch::async, [&] {
+        stopping.set_value();
+        interface.stop();
+    });
+    stopping_future.wait();
+    const auto before_release = stopped.wait_for(std::chrono::milliseconds(50));
+    // Release even if stop() incorrectly returned early, so the test can clean up.
+    release.set_value();
+    stopped.get();
+    EXPECT_EQ(before_release, std::future_status::timeout);
+    EXPECT_TRUE(exited);
+    EXPECT_FALSE(tool.isInitialized());
+    EXPECT_FALSE(tool.readStatusPeriodic());
+    EXPECT_FALSE(tool.writeCommandPeriodic());
+    EXPECT_FALSE(Rs485LifecycleTestPeer::worker(tool));
+    EXPECT_TRUE(Rs485LifecycleTestPeer::cleared(tool));
+    EXPECT_TRUE(tool.communicationStopped());
+    interface.stop();
+    EXPECT_TRUE(Rs485LifecycleTestPeer::cleared(tool));
+}
+
+TEST(Rs485Lifecycle, JodellStopWaitsForTransactionAndDiscardsPendingWork) {
+    JodellGripper tool(rclcpp::get_logger("test"), std::make_shared<rclcpp::Clock>(), "gripper_joint");
+    expectStopWaitsForTransaction(tool);
+    // A subsequent activation can create a new worker after the first was joined.
+    expectStopWaitsForTransaction(tool);
+}
+
+TEST(Rs485Lifecycle, AllLinkerHandModelsStopBeforeSdkRelease) {
+    for (const auto* type : {"o6", "l6", "o7"}) {
+        for (bool right : {false, true}) {
+            SCOPED_TRACE(std::string(type) + (right ? " right" : " left"));
+            LinkerHand::Config config;
+            config.hand_type = type;
+            config.right_hand = right;
+            const auto model = linkerhand::modelFor(type, right);
+            std::vector<std::string> names;
+            for (const auto& suffix : model.suffixes) {
+                names.push_back(std::string(right ? "right_hand_" : "left_hand_") + suffix);
+            }
+            LinkerHand tool(rclcpp::get_logger("test"), std::make_shared<rclcpp::Clock>(), names, config);
+            expectStopWaitsForTransaction(tool);
+            expectStopWaitsForTransaction(tool);
+        }
+    }
 }
 
 TEST_F(RokaeStartup, DestroyedSiblingIsRemovedBeforeAnotherActivationFails) {

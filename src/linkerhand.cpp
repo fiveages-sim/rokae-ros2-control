@@ -32,15 +32,25 @@ LinkerHand::LinkerHand(
     }
 }
 
-LinkerHand::~LinkerHand() {
-    running_ = false;
+LinkerHand::~LinkerHand() { stop(); }
+
+void LinkerHand::stop() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+        initialized_ = false;
+        command_pending_ = false;
+    }
     cv_.notify_all();
     if (communication_thread_.joinable()) {
         communication_thread_.join();
     }
+    robot_ = nullptr;
+    have_valid_positions_ = false;
 }
 
 bool LinkerHand::initialize(rokae::xMateErProRobot& robot) {
+    stop();
     if (joint_names_.size() != model_.jointCount()) {
         RCLCPP_ERROR(logger_, "LinkerHand %s requires %zu joints, got %zu", model_.name.c_str(), model_.jointCount(), joint_names_.size());
         return false;
@@ -70,7 +80,13 @@ bool LinkerHand::initialize(rokae::xMateErProRobot& robot) {
 
     initialized_ = true;
     running_ = true;
-    communication_thread_ = std::thread(&LinkerHand::communicationLoop, this);
+    try {
+        communication_thread_ = std::thread(&LinkerHand::communicationLoop, this);
+    } catch (const std::exception& e) {
+        stop();
+        RCLCPP_ERROR(logger_, "Failed to start LinkerHand worker: %s", e.what());
+        return false;
+    }
     RCLCPP_INFO(logger_, "LinkerHand %s initialized (slave=0x%02X, joints=%zu)", model_.name.c_str(), config_.slave_id, model_.jointCount());
     return true;
 }

@@ -45,6 +45,7 @@ public:
 
     bool initialize(rokae::xMateErProRobot& robot) override;
     void stop() override;
+    bool communicationStopped() const override { return !command_thread_.joinable() && robot_ptr_ == nullptr; }
     bool readStatusPeriodic() override;
     bool writeCommandPeriodic() override;
 

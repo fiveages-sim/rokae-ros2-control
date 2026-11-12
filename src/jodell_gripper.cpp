@@ -39,11 +39,7 @@ JodellGripper::JodellGripper(
           std::clamp(normalized_torque, 0.0, 1.0) * 255.0))
     , command_velocity_(static_cast<int>(
           std::clamp(normalized_velocity, 0.0, 1.0) * 255.0))
-{
-    // 启动后台命令处理线程
-    thread_running_ = true;
-    command_thread_ = std::thread(&JodellGripper::commandThreadFunction, this);
-}
+{}
 
 void JodellGripper::setToolDynamics(double normalized_torque, double normalized_velocity) {
     const int next_torque = static_cast<int>(std::clamp(normalized_torque, 0.0, 1.0) * 255.0);
@@ -58,11 +54,14 @@ void JodellGripper::setToolDynamics(double normalized_torque, double normalized_
     dynamics_dirty_ = true;
 }
 
-JodellGripper::~JodellGripper() {
+JodellGripper::~JodellGripper() { stop(); }
+
+void JodellGripper::stop() {
     // 停止后台线程
     {
         std::lock_guard lock(queue_mutex_);
         thread_running_ = false;
+        initialized_.store(false, std::memory_order_release);
     }
     queue_cv_.notify_all();
     
@@ -70,11 +69,23 @@ JodellGripper::~JodellGripper() {
     if (command_thread_.joinable()) {
         command_thread_.join();
     }
+    // The worker may have been inside an SDK call. Clear its robot pointer only
+    // after joining; the owner can now safely disconnect/destroy that robot.
+    robot_ptr_ = nullptr;
+    {
+        std::lock_guard lock(queue_mutex_);
+        while (!command_queue_.empty()) command_queue_.pop();
+    }
+    {
+        std::lock_guard lock(status_mutex_);
+        background_status_valid_ = false;
+    }
 }
 
 
 bool JodellGripper::initialize(rokae::xMateErProRobot& robot) {
     using Clock = std::chrono::steady_clock;
+    stop();
 
     // 保存机器人对象指针，供后台线程使用
     robot_ptr_ = &robot;
@@ -156,6 +167,14 @@ bool JodellGripper::initialize(rokae::xMateErProRobot& robot) {
     // 防止后台线程在最终状态读取后立即发起下一笔事务。
     std::this_thread::sleep_until(last_transaction_start + COMMUNICATION_INTERVAL);
     initialized_.store(true, std::memory_order_release);
+    thread_running_ = true;
+    try {
+        command_thread_ = std::thread(&JodellGripper::commandThreadFunction, this);
+    } catch (const std::exception& e) {
+        stop();
+        RCLCPP_ERROR(logger_, "Failed to start Jodell worker: %s", e.what());
+        return false;
+    }
     RCLCPP_INFO(logger_, "Jodell gripper initialization succeeded");
     return true;
 }

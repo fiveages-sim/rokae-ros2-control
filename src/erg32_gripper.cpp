@@ -120,12 +120,15 @@ void Erg32Gripper::stop() {
     running_ = false;
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
-    if (initialized_ && transfer_) {
-        std::vector<int> values{0x11, 0x11}; // rACT remains set, rSTOP stops both axes.
-        transfer_(0x10, 0x03E8, values);
-    }
+    const bool was_initialized = initialized_;
     initialized_ = false;
+    // Clear deferred SDK access even if the final device-stop RPC throws.
+    auto transfer = std::move(transfer_);
     transfer_ = {};
+    if (was_initialized && transfer) {
+        std::vector<int> values{0x11, 0x11}; // rACT remains set, rSTOP stops both axes.
+        transfer(0x10, 0x03E8, values);
+    }
 }
 
 void Erg32Gripper::fail(const char* reason) {

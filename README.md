@@ -42,6 +42,39 @@ move and obtaining a valid position fails, the driver latches a fault instead
 of restarting with old commands. Shutdown joins the realtime loop before
 invalidating the snapshot and closing state reception.
 
+Deactivation, shutdown, cleanup and activation rollback stop every arm in the
+same `startup_group` (default: `default`). The driver first cancels both arms,
+joins all realtime workers, and stops/joins all tool communication workers.
+It then stops state reception and attempts Idle and power-off for every arm
+before disconnecting or releasing any SDK session. Parameter callbacks are
+serialized with this sequence. Repeated lifecycle callbacks are supported.
+An exception on one arm is logged and does not skip the other arm's cleanup;
+failed cleanup returns an error rather than reporting successful deactivation.
+A failed stop RPC does not imply a live worker: each tool reports whether its
+worker and deferred SDK access have actually ended. For example, ERG32 clears
+its transport before the final stop RPC so an RPC exception cannot leave a
+destructor that later calls a freed robot. Arms in different startup groups
+are not stopped together during normal cleanup.
+
+When resources are live, `rokae_shutdown_guard` supervises cleanup in a separate
+process/session. The normal cleanup budget is 3 seconds, including callback
+locks, SDK calls, joins and SDK destruction. An unresolved worker or session
+also triggers the emergency path immediately; cleanup does not return into
+unsafe destructors. The supervisor starts one fresh power-off process per
+connected arm, concurrently, with a shared 2-second deadline. It then kills
+the controller-manager process using a pidfd, skipping all SDK/thread
+destructors. The supervisor also reacts if the controller process dies before
+reporting completion. It survives ROS launch signals sent to the original
+process group. This abnormal exit affects the entire controller process.
+
+Emergency power-off is best effort: a separate SDK connection may be rejected
+or time out. Success is logged only after reading back `PowerState::off`;
+failures/timeouts explicitly leave the physical power state unconfirmed.
+Install the helper with the library (`lib/rokae_ros2_control/rokae_shutdown_guard`);
+it is a required build dependency, not an optional debugging tool. If the
+supervisor cannot start, the driver exits without attempting SDK destruction
+and reports the failure. Linux pidfd support is required.
+
 ## 3. Rokae end-tool RS485 gripper
 
 The hardware plugin can control a gripper joint through the robot end-tool

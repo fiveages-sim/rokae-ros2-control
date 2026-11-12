@@ -28,6 +28,7 @@ add_library(${PROJECT_NAME} SHARED
         src/ag2f90d_gripper.cpp
         src/erg32_gripper.cpp
         src/linkerhand.cpp
+        src/shutdown_guard.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -58,7 +59,17 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
         ${OROCOS_KDL_LIBRARIES}
         pthread
         rt
+        ${CMAKE_DL_LIBS}
 )
+
+add_executable(rokae_shutdown_guard src/shutdown_guard_main.cpp)
+target_include_directories(rokae_shutdown_guard PRIVATE external/librokae/include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(rokae_shutdown_guard PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/librokae/lib/Linux/${ROKAE_LIB_DIR}/libxCoreSDK.a
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/librokae/lib/Linux/${ROKAE_LIB_DIR}/libxMateModel.a
+        pthread rt)
+install(TARGETS rokae_shutdown_guard RUNTIME DESTINATION lib/${PROJECT_NAME})
+add_dependencies(${PROJECT_NAME} rokae_shutdown_guard)
 
 pluginlib_export_plugin_description_file(hardware_interface rokae_ros2_control.xml)
 
@@ -88,6 +99,13 @@ if (BUILD_TESTING)
     ament_add_gtest(rokae_fault_test test/rokae_fault_test.cpp)
     target_include_directories(rokae_fault_test PRIVATE external/librokae/include ${EIGEN3_INCLUDE_DIRS})
     target_link_libraries(rokae_fault_test ${PROJECT_NAME})
+    add_dependencies(rokae_fault_test rokae_shutdown_guard)
+    ament_add_gtest(shutdown_guard_test test/shutdown_guard_test.cpp)
+    target_include_directories(shutdown_guard_test PRIVATE src)
+    target_link_libraries(shutdown_guard_test ${PROJECT_NAME})
+    target_compile_definitions(shutdown_guard_test PRIVATE
+        SHUTDOWN_GUARD_EXECUTABLE="$<TARGET_FILE:rokae_shutdown_guard>")
+    add_dependencies(shutdown_guard_test rokae_shutdown_guard)
     find_package(ament_lint_auto REQUIRED)
     ament_lint_auto_find_test_dependencies()
 endif ()

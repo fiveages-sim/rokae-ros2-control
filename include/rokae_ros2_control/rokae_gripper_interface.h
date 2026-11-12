@@ -15,7 +15,12 @@ public:
     virtual ~RokaeGripperInterface() = default;
 
     virtual bool initialize(rokae::xMateErProRobot& robot) = 0;
-    virtual void stop() {}
+    // Called before disconnecting/destroying the robot SDK. Return only after
+    // all background SDK access has finished. Must tolerate repeated calls.
+    virtual void stop() = 0;
+    // Query after stop() returns or throws, from the lifecycle thread only.
+    // True means no worker or deferred cleanup can access the robot SDK.
+    virtual bool communicationStopped() const = 0;
     virtual bool readStatusPeriodic() = 0;
     virtual bool writeCommandPeriodic() = 0;
 

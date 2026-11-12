@@ -31,6 +31,8 @@ public:
         std::vector<std::string> joint_names,
         Config config);
     ~LinkerHand() override;
+    void stop() override;
+    bool communicationStopped() const override { return !communication_thread_.joinable() && robot_ == nullptr; }
 
     bool initialize(rokae::xMateErProRobot& robot) override;
     bool readStatusPeriodic() override { return initialized_; }
@@ -53,6 +55,7 @@ public:
         std::vector<hardware_interface::CommandInterface::SharedPtr>& command_interfaces) override;
 
 private:
+    friend class Rs485LifecycleTestPeer;
     static constexpr int READ_INPUT_REGS = 0x04;
     static constexpr int WRITE_MULTI_REGS = 0x10;
     static constexpr int POSITION_REG = 0;

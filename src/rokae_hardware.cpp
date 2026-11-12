@@ -4,6 +4,7 @@
 #include "rokae_ros2_control/jodell_gripper.h"
 #include "rokae_ros2_control/erg32_gripper.h"
 #include "rokae_ros2_control/linkerhand.h"
+#include "shutdown_guard.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <sstream>
 #include <iomanip>
@@ -219,14 +220,7 @@ namespace rokae_ros2_control {
     }
 
     void RokaeHardware::rollbackStartupGroup() {
-        // Hold membership stable while stopping siblings; destruction unregisters first.
-        std::lock_guard<std::mutex> lock(startup_group_mutex);
-        for (auto* member : startup_members) {
-            if (member->startup_group_ != startup_group_) continue;
-            member->hardware_active_ = false;
-            member->rt_control_faulted_ = true;
-            member->shutdownRobot();
-        }
+        shutdownRobot(true);
     }
 
     RokaeHardware::~RokaeHardware() {
@@ -644,6 +638,7 @@ namespace rokae_ros2_control {
 
     rcl_interfaces::msg::SetParametersResult RokaeHardware::paramCallback(
         const std::vector<rclcpp::Parameter> &params) {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         rcl_interfaces::msg::SetParametersResult result;
         result.successful = true;
         if (rt_control_faulted_) {
@@ -991,7 +986,7 @@ namespace rokae_ros2_control {
         const rclcpp_lifecycle::State & /* previous_state */) {
         RCLCPP_INFO(get_node()->get_logger(), "Deactivating RokaeHardware...");
 
-        shutdownRobot();
+        if (!shutdownRobot()) return hardware_interface::CallbackReturn::ERROR;
 
         RCLCPP_INFO(get_node()->get_logger(), "✅ RokaeHardware deactivated");
 
@@ -999,20 +994,18 @@ namespace rokae_ros2_control {
     }
 
     hardware_interface::CallbackReturn RokaeHardware::on_error(const rclcpp_lifecycle::State &) {
-        hardware_active_ = false;
-        rt_control_faulted_ = true;
-        shutdownRobot();
-        return hardware_interface::CallbackReturn::SUCCESS;
+        return shutdownRobot(true) ? hardware_interface::CallbackReturn::SUCCESS :
+                                     hardware_interface::CallbackReturn::ERROR;
     }
 
     hardware_interface::CallbackReturn RokaeHardware::on_shutdown(const rclcpp_lifecycle::State &) {
-        shutdownRobot();
-        return hardware_interface::CallbackReturn::SUCCESS;
+        return shutdownRobot() ? hardware_interface::CallbackReturn::SUCCESS :
+                                 hardware_interface::CallbackReturn::ERROR;
     }
 
     hardware_interface::CallbackReturn RokaeHardware::on_cleanup(const rclcpp_lifecycle::State &) {
-        shutdownRobot();
-        return hardware_interface::CallbackReturn::SUCCESS;
+        return shutdownRobot() ? hardware_interface::CallbackReturn::SUCCESS :
+                                 hardware_interface::CallbackReturn::ERROR;
     }
 
     std::vector<hardware_interface::StateInterface::ConstSharedPtr> RokaeHardware::on_export_state_interfaces() {
@@ -1290,13 +1283,14 @@ namespace rokae_ros2_control {
         }
     }
 
-    void RokaeHardware::stopRealtimeControl() {
+    bool RokaeHardware::stopRealtimeControl() {
         // A finished-but-unjoined control thread can still leave the controller-side
         // realtime move active. Treat either condition as a session that must be stopped.
         if (!rt_control_running_ && !rt_control_thread_.joinable()) {
-            return;
+            return true;
         }
 
+        bool success = true;
         rt_control_running_ = false;
         rt_move_restart_requested_ = false;
 
@@ -1306,8 +1300,12 @@ namespace rokae_ros2_control {
             try {
                 rt_controller_->stopMove();
             } catch (const std::exception &e) {
+                success = false;
                 RCLCPP_ERROR(get_node()->get_logger(),
                              "Error stopping realtime move: %s", e.what());
+            } catch (...) {
+                success = false;
+                RCLCPP_ERROR(get_node()->get_logger(), "Error stopping realtime move: unknown exception");
             }
         }
 
@@ -1315,7 +1313,11 @@ namespace rokae_ros2_control {
             try {
                 rt_controller_->stopLoop();
             } catch (const std::exception& e) {
+                success = false;
                 RCLCPP_ERROR(get_node()->get_logger(), "Error stopping SDK scheduler: %s", e.what());
+            } catch (...) {
+                success = false;
+                RCLCPP_ERROR(get_node()->get_logger(), "Error stopping SDK scheduler: unknown exception");
             }
         }
 
@@ -1324,57 +1326,135 @@ namespace rokae_ros2_control {
         }
 
         RCLCPP_INFO(get_node()->get_logger(), "Realtime control stopped");
+        return success;
     }
 
-    void RokaeHardware::shutdownRobot() {
-        hardware_active_ = false;
-        // Stop producers first, including finished-but-unjoined workers. Never let
-        // a tool transfer delay cancellation of the arm's realtime command loop.
-        stopRealtimeControl();
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            state_snapshot_ = {};
+    bool RokaeHardware::shutdownRobot(bool fault_group) {
+        // Keep peers alive and serialize lifecycle callbacks, including repeated
+        // deactivate/shutdown/cleanup and activation rollback. Destruction
+        // unregisters first, so explicitly include this instance as well.
+        std::lock_guard<std::mutex> group_lock(startup_group_mutex);
+        std::vector<RokaeHardware*> members;
+        for (auto* member : startup_members) {
+            if (member->startup_group_ == startup_group_) members.push_back(member);
         }
-        if (gripper_) gripper_->stop();
-        if (!arm_robot_) return;
+        if (std::find(members.begin(), members.end(), this) == members.end()) {
+            members.push_back(this);
+        }
+        std::vector<detail::ShutdownEndpoint> endpoints;
+        bool needs_guard = false;
+        for (auto* member : members) {
+            if (member->arm_robot_) endpoints.push_back({member->arm_ip_, member->local_ip_});
+            needs_guard = needs_guard || member->arm_robot_ || member->rt_controller_ ||
+                member->rt_control_thread_.joinable() ||
+                (member->gripper_ && !member->gripper_->communicationStopped());
+        }
+        // Arm the independent watchdog before waiting for callbacks, SDK RPCs,
+        // or joins. It uses copied IPs, never pointers into these SDK sessions.
+        std::unique_ptr<detail::ShutdownGuard> watchdog;
+        if (needs_guard) watchdog = std::make_unique<detail::ShutdownGuard>(endpoints);
 
-        // Every cleanup step is independent: a failed stop/Idle RPC must not skip
-        // power-off, closing UDP ports, or disconnecting the SDK session.
-        const auto cleanup = [this](const char* label, const auto& action) {
+        // Cancel realtime callbacks even when a parameter RPC is stuck and the
+        // lifecycle thread cannot yet acquire that arm's parameter lock.
+        for (auto* member : members) {
+            member->hardware_active_ = false;
+            member->rt_control_running_ = false;
+            member->rt_move_restart_requested_ = false;
+            if (fault_group) member->rt_control_faulted_ = true;
+        }
+        std::vector<std::unique_lock<std::mutex>> parameter_locks;
+        parameter_locks.reserve(members.size());
+        for (auto* member : members) parameter_locks.emplace_back(member->lifecycle_mutex_);
+
+        bool success = true;
+        const auto cleanup = [&success](RokaeHardware* member, const char* label, const auto& action) {
             try {
                 action();
+                return true;
             } catch (const std::exception& e) {
-                RCLCPP_ERROR(get_node()->get_logger(), "%s for arm %s failed: %s",
-                             label, arm_ip_.c_str(), e.what());
+                RCLCPP_ERROR(member->get_node()->get_logger(), "%s for arm %s failed: %s",
+                             label, member->arm_ip_.c_str(), e.what());
+            } catch (...) {
+                RCLCPP_ERROR(member->get_node()->get_logger(), "%s for arm %s failed: unknown exception",
+                             label, member->arm_ip_.c_str());
             }
+            success = false;
+            return false;
         };
-        if (state_receive_started_.exchange(false)) {
-            cleanup("Stop robot state receiving", [this] {
-                arm_robot_->stopReceiveRobotState();
-                RCLCPP_INFO(get_node()->get_logger(), "Robot state receiving stopped");
+
+        bool workers_stopped = true;
+        for (auto* member : members) {
+            cleanup(member, "Stop realtime control", [member, &success] {
+                if (!member->stopRealtimeControl()) success = false;
+            });
+            if (member->rt_control_thread_.joinable()) workers_stopped = false;
+            std::lock_guard<std::mutex> state_lock(member->state_mutex_);
+            member->state_snapshot_ = {};
+        }
+        for (auto* member : members) {
+            if (member->gripper_) {
+                cleanup(member, "Stop tool communication", [member] { member->gripper_->stop(); });
+                if (!member->gripper_->communicationStopped()) workers_stopped = false;
+            }
+        }
+
+        // No arm is disconnected until all arms have attempted power-off.
+        // Failed Idle/receive operations must not skip either arm's power-off.
+        const bool producers_stopped = workers_stopped;
+        for (auto* member : members) {
+            if (!member->arm_robot_) continue;
+            if (producers_stopped && member->state_receive_started_) {
+                if (!cleanup(member, "Stop robot state receiving", [member] {
+                    member->arm_robot_->stopReceiveRobotState();
+                    member->state_receive_started_ = false;
+                    RCLCPP_INFO(member->get_node()->get_logger(), "Robot state receiving stopped");
+                })) workers_stopped = false;
+            }
+            cleanup(member, "Set arm Idle", [member] {
+                std::error_code ec;
+                member->arm_robot_->setMotionControlMode(rokae::MotionControlMode::Idle, ec);
+                if (ec) throw std::runtime_error(ec.message());
+            });
+            cleanup(member, "Power off arm", [member] {
+                std::error_code ec;
+                member->arm_robot_->setPowerState(false, ec);
+                if (ec) throw std::runtime_error(ec.message());
+                RCLCPP_INFO(member->get_node()->get_logger(), "✅ Arm powered off");
             });
         }
-        cleanup("Set arm Idle", [this] {
-            std::error_code ec;
-            arm_robot_->setMotionControlMode(rokae::MotionControlMode::Idle, ec);
-            if (ec) throw std::runtime_error(ec.message());
-        });
-        cleanup("Power off arm", [this] {
-            std::error_code ec;
-            arm_robot_->setPowerState(false, ec);
-            if (ec) throw std::runtime_error(ec.message());
-            RCLCPP_INFO(get_node()->get_logger(), "✅ Arm powered off");
-        });
-        if (rt_controller_) {
-            rt_controller_->disconnectNetwork();
-            rt_controller_.reset();
+
+        // Do not return into SDK/thread destructors with unresolved background
+        // access. The supervisor gives emergency power-off a separate deadline
+        // and then terminates this process without running any destructors.
+        if (!workers_stopped) {
+            RCLCPP_ERROR(get_node()->get_logger(),
+                         "Startup group '%s': background shutdown incomplete; invoking emergency exit",
+                         startup_group_.c_str());
+            watchdog->fail();
         }
-        cleanup("Disconnect arm", [this] {
-            std::error_code ec;
-            arm_robot_->disconnectFromRobot(ec);
-            if (ec) throw std::runtime_error(ec.message());
-        });
-        arm_robot_.reset();
+
+        for (auto* member : members) {
+            if (member->rt_controller_) {
+                const bool disconnected = cleanup(member, "Disconnect realtime network", [member] {
+                    member->rt_controller_->disconnectNetwork();
+                });
+                if (!disconnected) continue;
+                member->rt_controller_.reset();
+            }
+            if (!member->arm_robot_) continue;
+            const bool disconnected = cleanup(member, "Disconnect arm", [member] {
+                std::error_code ec;
+                member->arm_robot_->disconnectFromRobot(ec);
+                if (ec) throw std::runtime_error(ec.message());
+            });
+            if (!disconnected) continue;
+            member->arm_robot_.reset();
+            member->state_receive_started_ = false;
+        }
+        for (auto* member : members) {
+            if (member->arm_robot_ || member->rt_controller_) watchdog->fail();
+        }
+        return success;
     }
 
     void RokaeHardware::controlLoop() {

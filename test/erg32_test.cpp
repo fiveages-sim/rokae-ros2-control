@@ -138,6 +138,26 @@ TEST(Erg32Lifecycle, ReadyDeviceDoesNotResetOrTriggerMotionAndStopsOnExit) {
     EXPECT_FALSE(g.isInitialized());
 }
 
+TEST(Erg32Lifecycle, FinalStopRpcExceptionDoesNotLeaveDeferredSdkAccess) {
+    Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
+    std::atomic<bool> fail_stop{false};
+    Erg32TestPeer::transport(g, [&](int function, int address, std::vector<int>& data) {
+        if (function == 3) {
+            const std::array<uint16_t, 9> registers{0x18, 0x18, 0, 0, 90, 0, 1, 0, 0x2818};
+            for (size_t i = 0; i < data.size(); ++i) data[i] = registers[address - 0x07D0 + i];
+        } else if (fail_stop && address == 0x03E8) {
+            throw std::runtime_error("final stop RPC failed");
+        }
+        return true;
+    });
+    ASSERT_TRUE(Erg32TestPeer::initialize(g));
+    fail_stop = true;
+    EXPECT_THROW(g.stop(), std::runtime_error);
+    EXPECT_TRUE(g.communicationStopped());
+    EXPECT_FALSE(g.isInitialized());
+    EXPECT_NO_THROW(g.stop());
+}
+
 TEST(Erg32Lifecycle, InitialFaultRefusesActivation) {
     Erg32Gripper g(rclcpp::get_logger("test"), {"rotate_joint", "gripper_joint"}, {});
     Erg32TestPeer::transport(g, [](int function, int address, std::vector<int>& data) {

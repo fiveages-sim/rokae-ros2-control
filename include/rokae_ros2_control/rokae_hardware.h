@@ -47,7 +47,7 @@ namespace rokae_ros2_control {
         hardware_interface::CallbackReturn on_activate(const rclcpp_lifecycle::State &previous_state) override;
 
         /**
-         * @brief 停用硬件接口（停止实时控制、下电、断开连接）
+         * @brief 按组停用双臂（先停止全部后台任务，再下电，最后断开连接）
          * @param previous_state 前一个生命周期状态
          * @return 停用结果
          */
@@ -163,6 +163,8 @@ namespace rokae_ros2_control {
         // Terminal for this SDK session; only fresh initialization clears a fault.
         std::atomic<bool> rt_control_faulted_{false};
         friend class RokaeHardwareTestPeer;
+        // Drain parameter callbacks before stopping or releasing their SDK session.
+        std::mutex lifecycle_mutex_;
         std::mutex control_mode_mutex_;
         std::mutex data_mutex_;
 
@@ -198,13 +200,14 @@ namespace rokae_ros2_control {
 
         void startRealtimeControl();
 
-        void stopRealtimeControl();
+        bool stopRealtimeControl();
 
         void latchRealtimeFault();
 
         void controlLoop();
 
-        void shutdownRobot();
+        // Stop the complete startup group in phases before releasing any SDK.
+        bool shutdownRobot(bool fault_group = false);
 
         void declareControlParameters(
             const hardware_interface::HardwareComponentInterfaceParams &params);
